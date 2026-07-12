@@ -6,5 +6,8 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "matplotlib>=3.11.0",
+    "pyqt6>=6.11.0",
+    "pyqtgraph>=0.14.0",
     "scipy>=1.18.0",
+    "wfdb>=4.3.1",
 ]
