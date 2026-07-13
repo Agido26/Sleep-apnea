@@ -22,14 +22,4 @@ class Loader():
         except Exception as e:
             print(f"حدث خطأ أثناء تحميل البيانات من ملف CSV: {e}")
             return None, None
-    def load_data(self, source='physionet', file_path=None):
-        '''
-        هذه الدالة تقوم بتحميل البيانات إما من قاعدة بيانات PhysioNet أو من ملف CSV محلي.
-        '''
-        if source == 'physionet':
-            return self.physionet_data()
-        elif source == 'csv' and file_path is not None:
-            return self.load_csv_data(file_path)
-        else:
-            print("مصدر البيانات غير صالح. يرجى اختيار 'physionet' أو 'csv' مع تحديد مسار الملف.")
-            return None, None
+    

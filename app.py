@@ -9,7 +9,7 @@ from UI.Simulation.real_time_ecg_viewer import RealTimeECGViewer
 # 1. جلب البيانات من PhysioNet
 print("جاري تحميل البيانات...")
 loader= Loader.Loader(record_name='a01', num_samples=5000)
-signal,fs = loader.load_data()
+signal,fs = loader.load_csv_data('ecg_signal.csv')  # تحميل البيانات من ملف CSV محلي
 # 2. تشغيل الواجهة الرسومية
 app = QtWidgets.QApplication(sys.argv)
 viewer = RealTimeECGViewer(signal, fs)
