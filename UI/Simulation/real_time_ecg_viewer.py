@@ -1,5 +1,8 @@
+import sys
 import pyqtgraph as pg
 from PyQt6 import QtWidgets, QtCore
+
+from Business_Logic.Business_Simulation.Loader import Loader
 
 class RealTimeECGViewer(QtWidgets.QMainWindow):
     def __init__(self, signal, fs):
@@ -46,3 +49,16 @@ class RealTimeECGViewer(QtWidgets.QMainWindow):
         self.data_line.setData(self.x, self.y)
         
         self.current_index += self.chunk_size
+
+def main():
+    # 1. جلب البيانات من PhysioNet
+    print("جاري تحميل البيانات...")
+    loader = Loader()
+    signal,fs = loader.load_csv_data('ecg_signal.csv')  # تحميل البيانات من ملف CSV محلي
+    # 2. تشغيل الواجهة الرسومية
+    app = QtWidgets.QApplication(sys.argv)
+    viewer = RealTimeECGViewer(signal, fs)
+    viewer.resize(800, 400)
+    viewer.show()
+    sys.exit(app.exec())
+    

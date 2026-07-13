@@ -5,6 +5,9 @@ class Loader():
         self.record_name=record_name
         self.num_samples=num_samples
 
+    def __init__(self):
+        pass
+        
     def physionet_data(self):
         ecg_signal, fs=data_loader.load_physionet_data(self.record_name,self.num_samples) 
         return ecg_signal,fs
