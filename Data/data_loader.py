@@ -1,5 +1,5 @@
 import wfdb
-
+import pandas as pd
 def load_physionet_data(record_name='a01', num_samples=5000):
     '''
     هذه الدالة تقوم بالاتصال بقاعدة بيانات PhysioNet 
@@ -19,6 +19,6 @@ def load_physionet_data(record_name='a01', num_samples=5000):
     
     print(f"تم بنجاح تحميل {len(ecg_signal)} نقطة قراءة.")
     print(f"معدل التحديث (Sampling Frequency): {fs} قراءة في الثانية.")
-    
+    pd.DataFrame(ecg_signal).to_csv('ecg_signal.csv', index=False)  # حفظ البيانات في ملف CSV
     return ecg_signal, fs
 
