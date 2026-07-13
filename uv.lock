@@ -1243,6 +1243,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "pyqt6" },
     { name = "pyqtgraph" },
+    { name = "requests" },
     { name = "scipy" },
     { name = "wfdb" },
 ]
@@ -1252,6 +1253,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.11.0" },
     { name = "pyqt6", specifier = ">=6.11.0" },
     { name = "pyqtgraph", specifier = ">=0.14.0" },
+    { name = "requests", specifier = ">=2.34.2" },
     { name = "scipy", specifier = ">=1.18.0" },
     { name = "wfdb", specifier = ">=4.3.1" },
 ]
