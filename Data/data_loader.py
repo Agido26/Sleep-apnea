@@ -13,7 +13,7 @@ def load_physionet_data(record_name='a01', num_samples=5000):
         record = wfdb.rdrecord(record_name, pn_dir='apnea-ecg', sampto=num_samples)
 
         # استخراج إشارة الفولتية الخاصة بـ ECG وتحويلها لمصفوفة أحادية الأبعاد
-        ecg_signal = record.p_signal[:, 0]
+        ecg_signal = record.p_signal
 
         # استخراج معدل أخذ العينات (Sampling Frequency) - في هذه القاعدة هو 100 هرتز
         fs = record.fs 

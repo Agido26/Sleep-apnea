@@ -1,18 +1,19 @@
 from Data import data_loader
 import pandas as pd
-class Loader():
-    def __init__(self,record_name='a01',num_samples=5000):
+class DataLoader():
+    def __init__(self,record_name,num_samples):
         self.record_name=record_name
         self.num_samples=num_samples
 
     def __init__(self):
         pass
-        
-    def physionet_data(self):
-        ecg_signal, fs=data_loader.load_physionet_data(self.record_name,self.num_samples) 
+            
+    @staticmethod
+    def physionet_data(record_name,num_samples):
+        ecg_signal, fs=data_loader.load_physionet_data(record_name,num_samples) 
         return ecg_signal,fs
-    
-    def load_csv_data(self, file_path):
+    @staticmethod
+    def load_csv_data(file_path):
         '''
         هذه الدالة تقوم بتحميل البيانات من ملف CSV محلي.
         '''
