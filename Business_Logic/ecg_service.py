@@ -2,6 +2,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 # Import ONLY from the Data Layer here
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 import numpy as np
+from scipy.signal import find_peaks
 
 class ECGService(QObject):
     """
@@ -56,19 +57,31 @@ class ECGService(QObject):
         """
         data = np.array(raw_buffer)
 
-        # Example placeholder for your peak detection logic
-        # r_peaks = self.find_peaks_algorithm(data)
-        # r_r_intervals = np.diff(r_peaks) / self.sample_rate
+        # A good rule of thumb: The R-peak is significantly higher than the mean signal
+        threshold = np.mean(data) + 1.0 * np.std(data)
         
-        # Simulated BPM calculation for demonstration:
-        estimated_bpm = 72  # Replace with actual calculated BPM
-        self.bpm_updated.emit(estimated_bpm)
+        # We assume a maximum heart rate of ~150 BPM, meaning peaks are at least 0.4 seconds apart
+        # 0.4s * 250 samples/sec = 100 samples minimum distance between peaks
+        min_distance = int(self.sample_rate * 0.4)
 
-        # Deterministic Apnea Screening Rule (Bradycardia/Tachycardia pattern check)
-        # if self.detect_apnea_pattern(r_r_intervals):
-        #     self.apnea_warning_triggered.emit(True, "WARNING: Apnea Pattern Detected!")
-        # else:
-        #     self.apnea_warning_triggered.emit(False, "Normal Breathing Pattern")
+        peaks, _ = find_peaks(data, height=threshold, distance=min_distance)
+
+        if len(peaks) > 1:
+            # Calculate time difference between consecutive R-peaks in seconds
+            r_r_intervals = np.diff(peaks) / self.sample_rate
+            
+            # Calculate Average Heart Rate (60 seconds / average R-R interval)
+            mean_rr = np.mean(r_r_intervals)
+            real_bpm = int(60 / mean_rr)
+            
+            self.bpm_updated.emit(real_bpm)
+
+            # --- APNEA DETECTION LOGIC (Placeholder for next step) ---
+            # if we see a standard deviation in r_r_intervals that matches the Bradycardia/Tachycardia pattern:
+            #     self.apnea_warning_triggered.emit(True, "WARNING: Apnea Pattern Detected!")
+        else:
+            # Not enough peaks found in 10 seconds (Sensor might be disconnected or noisy)
+            self.bpm_updated.emit(0)
 
     def _handle_leads_off(self, is_off: bool):
         if is_off:
