@@ -82,6 +82,13 @@ class ECGDashboard(QMainWindow):
         # تحديث الخط على الشاشة
         self.data_line.setData(self.plot_data)
 
+    def update_sensor_status(self, is_ok: bool, message: str):
+        self.status_label.setText(message)
+        if not is_ok:
+            self.status_label.setStyleSheet("font-size: 16px; color: orange; font-weight: bold;")
+        else:
+            self.status_label.setStyleSheet("font-size: 16px; color: green;")
+    
     def update_bpm(self, bpm: int):
         """تحديث نص معدل النبضات"""
         self.bpm_label.setText(f"BPM: {bpm}")
