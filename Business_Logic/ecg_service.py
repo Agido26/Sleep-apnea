@@ -2,7 +2,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 # Import ONLY from the Data Layer here
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 import numpy as np
-from scipy.signal import find_peaks
+from scipy.signal import find_peaks, butter, filtfilt
 
 class ECGService(QObject):
     """
@@ -20,12 +20,11 @@ class ECGService(QObject):
         super().__init__()
         self.sample_rate = sample_rate
         
-        # 1. Instantiate the Data Layer receiver
-        self.reader = ECGSerialReader(
-            port=port, 
-            baudrate=baudrate, 
-            sample_rate=sample_rate
-        )
+        # State variables for the live-plot Exponential Moving Average (EMA) filter
+        self.ema_value = 0.0
+        self.ema_alpha = 0.3  # Smoothing factor (Lower = smoother but slightly delayed)
+
+        self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
 
         # 2. Wire Data Layer signals to internal Business Layer methods
         self.reader.new_sample_received.connect(self._handle_raw_sample)
@@ -42,29 +41,41 @@ class ECGService(QObject):
         self.reader.stop()
 
     # --- Internal Business Logic Methods ---
-
-    def _handle_raw_sample(self, value: int):
+    def _butter_bandpass_filter(self, data, lowcut=0.5, highcut=40.0, fs=250.0, order=3):
         """
-        Optional: Apply a light bandpass/moving-average filter here
-        before sending the sample to the UI for smooth plotting.
+        Applies a zero-phase Butterworth bandpass filter.
+        - lowcut (0.5Hz): Removes baseline wander (breathing/movement).
+        - highcut (40Hz): Removes muscle noise and 50Hz/60Hz electrical grid interference.
         """
-        self.live_sample_ready.emit(value)
+        nyquist = 0.5 * fs
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        b, a = butter(order, [low, high], btype='band')
+        # filtfilt applies the filter forward and backward to prevent phase shifting (keeps peaks exact)
+        y = filtfilt(b, a, data)
+        return y
 
-    def _analyze_10s_window(self, raw_buffer: list):
+    def _handle_raw_sample(self, raw_buffer: list):
         """
         Core Deterministic Rule-Based Algorithm:
-        Executes Peak Detection -> R-R Interval -> BPM -> Apnea Screening.
+        Executes Bandpass Filter -> Peak Detection -> R-R Interval -> BPM -> Apnea Screening.
         """
-        data = np.array(raw_buffer)
+        raw_data = np.array(raw_buffer)
 
-        # A good rule of thumb: The R-peak is significantly higher than the mean signal
-        threshold = np.mean(data) + 1.0 * np.std(data)
+        # 1. APPLY BANDPASS FILTER to clean the window completely before math
+        filtered_data = self._butter_bandpass_filter(raw_data, lowcut=0.5, highcut=40.0, fs=self.sample_rate)
+
+        # 2. Dynamic Thresholding on the FILTERED data
+        # Because filtfilt centers the data around 0, the mean is 0. 
+        # We look for peaks that are 1.2 standard deviations above the baseline.
+        threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
         
         # We assume a maximum heart rate of ~150 BPM, meaning peaks are at least 0.4 seconds apart
         # 0.4s * 250 samples/sec = 100 samples minimum distance between peaks
         min_distance = int(self.sample_rate * 0.4)
 
-        peaks, _ = find_peaks(data, height=threshold, distance=min_distance)
+        # 3. Find peaks on the clean data
+        peaks, _ = find_peaks(filtered_data, height=threshold, distance=min_distance)
 
         if len(peaks) > 1:
             # Calculate time difference between consecutive R-peaks in seconds
