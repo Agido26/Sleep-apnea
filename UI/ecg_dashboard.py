@@ -1,75 +1,93 @@
-#  NEW WAY (Connecting through Business Layer)
-from Business_Logic.ecg_service import ECGService  # Import Business Layer only
-from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QVBoxLayout, QWidget
-import pyqtgraph as pg
-from collections import deque
+import sys
+from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout
+from PyQt6.QtCore import Qt
+import pyqtgraph as pg  # استيراد مكتبة الرسم السريع
+from Business_Logic.ecg_service import ECGService
+
 class ECGDashboard(QMainWindow):
-    def __init__(self):
-        super().__init__()
+    def init(self):
+        super().init()
         self.setWindowTitle("ECG Apnea Screening Dashboard")
-        self.resize(800, 600)
+        self.resize(1000, 600)
         
-        self.status_label = QLabel("Initializing Connection...")
+        # --- 1. تصميم الواجهة ---
+        main_layout = QVBoxLayout()
+        info_layout = QHBoxLayout()
+
+        # إعداد الـ Labels بنصوص كبيرة وواضحة
+        self.status_label = QLabel("status: connecting...")
         self.bpm_label = QLabel("BPM: --")
-        self.alert_label = QLabel("Status: Ready")
+        self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
+        self.alert_label = QLabel("Breathing Status: analyzing...")
         
+        info_layout.addWidget(self.status_label)
+        info_layout.addWidget(self.bpm_label)
+        info_layout.addWidget(self.alert_label)
+        main_layout.addLayout(info_layout)
+
+        # إعداد الرسم البياني (PyQtGraph)
         self.graph_widget = pg.PlotWidget()
-        self.graph_widget.setBackground('w')  # White background for clinical look
-        self.graph_widget.setTitle("Real-Time Single-Lead ECG", color="b", size="12pt")
+        self.graph_widget.setBackground('w') # خلفية بيضاء
+        self.graph_widget.setTitle("Real-Time ECG Plot", color="k", size="15pt")
         self.graph_widget.showGrid(x=True, y=True)
-        self.graph_widget.setYRange(0, 1024)  # Standard 10-bit Arduino ADC range (0-1023)
+        self.graph_widget.setYRange(0, 1023) # مدى الحساس في الأردوينو
         
-        # Create a red plotting curve
-        self.plot_curve = self.graph_widget.plot(pen=pg.mkPen(color='r', width=2))
-        
-        # Deque for plotting just the last 4 seconds of data (4 * 250Hz = 1000 samples)
-        # This keeps the graph moving left-to-right like a hospital monitor
-        self.plot_data = deque([0] * 1000, maxlen=1000)
-        
-        layout = QVBoxLayout()
-        layout.addWidget(self.graph_widget)
-        layout.addWidget(self.status_label)
-        layout.addWidget(self.bpm_label)
-        layout.addWidget(self.alert_label)
-        
+        # خط الرسم
+        pen = pg.mkPen(color='r', width=2) # خط أحمر
+        self.data_line = self.graph_widget.plot([], [], pen=pen)
+        main_layout.addWidget(self.graph_widget)
+
+        # إعداد نافذة التطبيق
         container = QWidget()
-        container.setLayout(layout)
+        container.setLayout(main_layout)
         self.setCentralWidget(container)
 
-        # 1. Instantiate the Business Service (NOT the thread directly)
-        self.ecg_service = ECGService(port="COM3", baudrate=115200, sample_rate=250)
+        # بيانات الرسم المؤقتة (لرسم آخر 1000 قراءة فقط لتجنب بطء الشاشة)
+        self.plot_data = [512] * 1000 
 
-        # 2. Connect Business Layer Signals to UI Callbacks
+        # --- 2. ربط طبقة الأعمال (Business Layer) ---
+        self.ecg_service = ECGService(port="COM3", baudrate=115200, sample_rate=250)
         self.ecg_service.live_sample_ready.connect(self.update_live_graph)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
         self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
 
-        # 3. Start monitoring through the Service method
+        # تشغيل المراقبة
         self.ecg_service.start_monitoring()
 
-    
-    def update_live_graph(self, sample_value: int):
-        """Called whenever a new filtered ECG sample arrives."""
-        self.plot_data.append(sample_value)
-        self.plot_curve.setData(list(self.plot_data))
+    def update_live_graph(self, value: int):
+        """تحديث الرسم البياني بسرعة البرق 250 مرة في الثانية"""
+        # إضافة القيمة الجديدة في نهاية المصفوفة وحذف أقدم قيمة
+        self.plot_data = self.plot_data[1:]
+        self.plot_data.append(value)
+        # تحديث الخط على الشاشة
+        self.data_line.setData(self.plot_data)
 
     def update_bpm(self, bpm: int):
-        """Called when a 10s window is processed and BPM is calculated."""
-        # e.g., self.bpm_label.setText(f"BPM: {bpm}")
-        pass
+        """تحديث نص معدل النبضات"""
+        self.bpm_label.setText(f"BPM: {bpm}")
+        if bpm < 40 or bpm > 150:
+            self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: red;")
+        else:
+            self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: green;")
 
     def update_apnea_status(self, is_apnea: bool, message: str):
-        """Called when an apnea event pattern is detected or cleared."""
-        # e.g., self.status_label.setText(message)
-        pass
+        """تحديث نص إنذار الاختناق التنفسي"""
+        self.alert_label.setText(message)
+        if is_apnea:
+            self.alert_label.setStyleSheet("font-size: 18px; color: red; font-weight: bold;")
+        else:
+            self.alert_label.setStyleSheet("font-size: 18px; color: green;")
 
     def update_sensor_status(self, is_ok: bool, message: str):
-        """Handles connection status and Leads-Off disconnect warnings."""
-        # e.g., self.connection_label.setText(message)
-        pass
+        """تحديث حالة الاتصال (Leads-Off)"""
+        self.status_label.setText(message)
+        if not is_ok:
+            self.status_label.setStyleSheet("font-size: 16px; color: orange; font-weight: bold;")
+        else:
+            self.status_label.setStyleSheet("font-size: 16px; color: green;")
 
     def closeEvent(self, event):
-        """Stop the service cleanly when closing the application window."""
+        """إيقاف الاتصال بأمان عند الإغلاق"""
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)

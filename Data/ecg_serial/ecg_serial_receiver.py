@@ -70,10 +70,11 @@ class ECGSerialReader(QThread):
                 print(f"[LIVE SERIAL - {self.port}] Sample #{sample_counter} | Raw Value: {value}")
                 
                 # Check for Leads-Off indicator (-1 sent by Arduino)
-                if value == -1:
-                    print("[WARNING] Arduino sent '-1': Leads-Off (Electrode disconnected) detected!")
+                if value == -1 or value == 1023:
+                    # إرسال تحذير للواجهة
                     self.leads_off_detected.emit(True)
-                    continue
+                    # تعيين قيمة المنتصف (512) لكي لا يتوقف الرسم ولا تتوقف الحسابات
+                    value = 512
                 else:
                     self.leads_off_detected.emit(False)
 
