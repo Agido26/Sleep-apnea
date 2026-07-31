@@ -33,15 +33,26 @@ class ECGSerialReader(QThread):
         """
         Main thread loop: Opens serial port and reads incoming lines at 250Hz.
         """
+        # --- 1. DEBUG: Show available ports before connecting ---
+        available_ports = self.get_available_ports()
+        print(f"[DEBUG] Available USB/COM Ports on laptop: {available_ports}")
+
         try:
+            print(f"[INFO] Attempting connection to Arduino on {self.port} at {self.baudrate} baud...")
             self.serial_conn = serial.Serial(self.port, self.baudrate, timeout=1)
             time.sleep(2)  # Allow Arduino microcontroller to reset after serial connection
             self.serial_conn.reset_input_buffer()
             self.is_running = True
-            print(f"[INFO] Connected to Arduino on {self.port} at {self.baudrate} baud.")
+            print(f"[SUCCESS] Connected to {self.port}! Listening for live ECG data...")
         except Exception as e:
-            self.connection_error.emit(f"Failed to connect to {self.port}: {str(e)}")
+            error_msg = f"Failed to connect to {self.port}: {str(e)}"
+            print(f"\n[CRITICAL ERROR] {error_msg}")
+            print("[TIP] 1. Is the Arduino IDE Serial Monitor open? If yes, CLOSE IT!")
+            print("[TIP] 2. Is your Arduino plugged into COM3, or a different COM port?\n")
+            self.connection_error.emit(error_msg)
             return
+
+        sample_counter = 0
 
         while self.is_running and self.serial_conn.is_open:
             try:
@@ -51,11 +62,16 @@ class ECGSerialReader(QThread):
                 if not raw_line:
                     continue
                 
-                # Parse integer value
+                # --- 2. DEBUG: Parse integer value with error detection ---
                 value = int(raw_line)
+                
+                # Print live data to the terminal so you can verify it before the UI
+                sample_counter += 1
+                print(f"[LIVE SERIAL - {self.port}] Sample #{sample_counter} | Raw Value: {value}")
                 
                 # Check for Leads-Off indicator (-1 sent by Arduino)
                 if value == -1:
+                    print("[WARNING] Arduino sent '-1': Leads-Off (Electrode disconnected) detected!")
                     self.leads_off_detected.emit(True)
                     continue
                 else:
@@ -69,12 +85,16 @@ class ECGSerialReader(QThread):
                 
                 # Emit full buffer copy when it is full (for peak detection & apnea estimation)
                 if len(self.fifo_buffer) == self.buffer_size:
+                    print(f"[BUFFER FULL] 10-second window ({self.buffer_size} samples) ready for ECG analysis!")
                     self.buffer_updated.emit(list(self.fifo_buffer))
 
             except ValueError:
-                # Ignore corrupted lines during startup/transmission noise
+                # --- 3. DEBUG: Catch when Arduino sends text instead of numbers ---
+                print(f"[PARSE ERROR] Received non-integer data from Arduino: '{raw_line}'")
+                print("[TIP] Ensure your Arduino sketch uses 'Serial.println(val)' without extra text letters!")
                 continue
             except Exception as e:
+                print(f"[SERIAL ERROR] Connection dropped: {str(e)}")
                 self.connection_error.emit(f"Serial read error: {str(e)}")
                 break
 
@@ -89,7 +109,7 @@ class ECGSerialReader(QThread):
         """Closes the serial port cleanly."""
         if self.serial_conn and self.serial_conn.is_open:
             self.serial_conn.close()
-            print("[INFO] Serial connection closed.")
+            print("[INFO] Serial connection closed safely.")
 
     @staticmethod
     def get_available_ports():
