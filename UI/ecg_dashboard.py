@@ -90,22 +90,20 @@ class ECGDashboard(QMainWindow):
         else:
             self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: green;")
 
+    def update_hrv(self, hrv_value: float):
+        """Updates the HRV label with calculated SDNN in milliseconds."""
+        self.hrv_label.setText(f"HRV (SDNN): {hrv_value:.1f} ms")
+
+    def update_peaks_graph(self, x_peaks: list, y_peaks: list):
+        """Draws bright red dots on top of the R-peaks whenever a 10s window is analyzed."""
+        self.peak_scatter.setData(x_peaks, y_peaks)
+
     def update_apnea_status(self, is_apnea: bool, message: str):
-        """تحديث نص إنذار الاختناق التنفسي"""
         self.alert_label.setText(message)
         if is_apnea:
             self.alert_label.setStyleSheet("font-size: 18px; color: red; font-weight: bold;")
         else:
             self.alert_label.setStyleSheet("font-size: 18px; color: green;")
-
-    def update_sensor_status(self, is_ok: bool, message: str):
-        """تحديث حالة الاتصال (Leads-Off)"""
-        self.status_label.setText(message)
-        if not is_ok:
-            self.status_label.setStyleSheet("font-size: 16px; color: orange; font-weight: bold;")
-        else:
-            self.status_label.setStyleSheet("font-size: 16px; color: green;")
-
     def closeEvent(self, event):
         """إيقاف الاتصال بأمان عند الإغلاق"""
         self.ecg_service.stop_monitoring()
