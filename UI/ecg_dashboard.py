@@ -18,25 +18,42 @@ class ECGDashboard(QMainWindow):
         self.status_label = QLabel("status: connecting...")
         self.bpm_label = QLabel("BPM: --")
         self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
-        self.alert_label = QLabel("Breathing Status: analyzing...")
+        self.alert_label = QLabel("Apnea Status: Analyzing...")
+        
+        # NEW: HRV Label
+        self.hrv_label = QLabel("HRV (SDNN): -- ms")
+        self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: purple;")
         
         info_layout.addWidget(self.status_label)
         info_layout.addWidget(self.bpm_label)
+        info_layout.addWidget(self.hrv_label)
         info_layout.addWidget(self.alert_label)
         main_layout.addLayout(info_layout)
 
-        # إعداد الرسم البياني (PyQtGraph)
-        self.graph_widget = pg.PlotWidget()
-        self.graph_widget.setBackground('w') # خلفية بيضاء
-        self.graph_widget.setTitle("Real-Time ECG Plot", color="k", size="15pt")
-        self.graph_widget.showGrid(x=True, y=True)
-        self.graph_widget.setYRange(0, 1023) # مدى الحساس في الأردوينو
-        
-        # خط الرسم
-        pen = pg.mkPen(color='r', width=2) # خط أحمر
-        self.data_line = self.graph_widget.plot([], [], pen=pen)
-        main_layout.addWidget(self.graph_widget)
 
+        # --- 2. Real-Time Graph Setup ---
+        self.graph_widget = pg.PlotWidget()
+        self.graph_widget.setBackground('w')
+        self.graph_widget.setTitle("Real-Time ECG with R-Peak Verification", color="k", size="15pt")
+        self.graph_widget.showGrid(x=True, y=True)
+        self.graph_widget.setYRange(0, 1023)
+
+       # Layer 1: Continuous ECG Line (Blue)
+        pen = pg.mkPen(color='b', width=2)
+        self.data_line = self.graph_widget.plot([], [], pen=pen, name="ECG Signal")
+        
+        # Layer 2: Red Dots on Detected R-Peaks (Scatter Plot)
+        self.peak_scatter = self.graph_widget.plot(
+            [], [], 
+            pen=None, 
+            symbol='o', 
+            symbolBrush='r', 
+            symbolSize=10, 
+            name="Detected R-Peaks"
+        )
+
+
+        main_layout.addWidget(self.graph_widget)
         # إعداد نافذة التطبيق
         container = QWidget()
         container.setLayout(main_layout)
@@ -45,14 +62,16 @@ class ECGDashboard(QMainWindow):
         # بيانات الرسم المؤقتة (لرسم آخر 1000 قراءة فقط لتجنب بطء الشاشة)
         self.plot_data = [512] * 1000 
 
-        # --- 2. ربط طبقة الأعمال (Business Layer) ---
+       # --- 3. Connect Business Layer Signals ---
         self.ecg_service = ECGService(port="COM3", baudrate=115200, sample_rate=250)
         self.ecg_service.live_sample_ready.connect(self.update_live_graph)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
+        self.ecg_service.hrv_updated.connect(self.update_hrv)              # Connect HRV
+        self.ecg_service.peaks_detected.connect(self.update_peaks_graph)   # Connect Red Dots
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
         self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
-
-        # تشغيل المراقبة
+        
+        # Start the ECG monitoring thread
         self.ecg_service.start_monitoring()
 
     def update_live_graph(self, value: int):

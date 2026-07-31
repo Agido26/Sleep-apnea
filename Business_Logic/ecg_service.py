@@ -11,10 +11,13 @@ class ECGService(QObject):
     Performs signal processing, peak detection, and apnea screening.
     """
     # Signals sent ONLY to the UI Layer
-    live_sample_ready = pyqtSignal(int)            # Raw or filtered sample for charting
+   # Signals sent ONLY to the UI Layer
+    live_sample_ready = pyqtSignal(int)            # Continuous live sample
     bpm_updated = pyqtSignal(int)                  # Calculated Heart Rate
-    apnea_warning_triggered = pyqtSignal(bool, str) # (is_apnea, status_message)
-    sensor_status_changed = pyqtSignal(bool, str)  # (is_connected, message)
+    hrv_updated = pyqtSignal(float)                # Calculated HRV (SDNN in ms)
+    peaks_detected = pyqtSignal(list, list)        # (x_indices, y_values) for Red Dots
+    apnea_warning_triggered = pyqtSignal(bool, str)
+    sensor_status_changed = pyqtSignal(bool, str)
 
     def __init__(self, port="COM3", baudrate=115200, sample_rate=250):
         super().__init__()
@@ -73,7 +76,7 @@ class ECGService(QObject):
     def _analyze_10s_window(self, raw_buffer: list):
         """
         Core Deterministic Rule-Based Algorithm:
-        Executes Bandpass Filter -> Peak Detection -> R-R Interval -> BPM -> Apnea Screening.
+        Executes Bandpass Filter -> Peak Detection -> R-R Interval -> BPM -> HRV -> UI Verification.
         """
         raw_data = np.array(raw_buffer)
 
@@ -81,12 +84,7 @@ class ECGService(QObject):
         filtered_data = self._butter_bandpass_filter(raw_data, lowcut=0.5, highcut=40.0, fs=self.sample_rate)
 
         # 2. Dynamic Thresholding on the FILTERED data
-        # Because filtfilt centers the data around 0, the mean is 0. 
-        # We look for peaks that are 1.2 standard deviations above the baseline.
         threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
-        
-        # We assume a maximum heart rate of ~150 BPM, meaning peaks are at least 0.4 seconds apart
-        # 0.4s * 250 samples/sec = 100 samples minimum distance between peaks
         min_distance = int(self.sample_rate * 0.4)
 
         # 3. Find peaks on the clean data
@@ -96,19 +94,34 @@ class ECGService(QObject):
             # Calculate time difference between consecutive R-peaks in seconds
             r_r_intervals = np.diff(peaks) / self.sample_rate
             
-            # Calculate Average Heart Rate (60 seconds / average R-R interval)
+            # --- BPM Calculation ---
             mean_rr = np.mean(r_r_intervals)
             real_bpm = int(60 / mean_rr)
-            
             self.bpm_updated.emit(real_bpm)
+
+            # --- NEW 1: HRV (SDNN) Calculation ---
+            # Convert seconds to milliseconds, then find the Standard Deviation
+            rr_intervals_ms = r_r_intervals * 1000.0
+            hrv_sdnn = float(np.std(rr_intervals_ms))
+            self.hrv_updated.emit(hrv_sdnn)
+
+            # --- NEW 2: Peak Coordinates for UI (Red Dots) ---
+            # EXTREMELY IMPORTANT: We use X-indices from 'peaks', but grab the Y-values 
+            # from 'raw_data' so the dots perfectly align with the live UI line!
+            x_indices = peaks.tolist()
+            y_values = raw_data[peaks].tolist()
+            self.peaks_detected.emit(x_indices, y_values)
 
             # --- APNEA DETECTION LOGIC (Placeholder for next step) ---
             # if we see a standard deviation in r_r_intervals that matches the Bradycardia/Tachycardia pattern:
             #     self.apnea_warning_triggered.emit(True, "WARNING: Apnea Pattern Detected!")
+            
         else:
             # Not enough peaks found in 10 seconds (Sensor might be disconnected or noisy)
             self.bpm_updated.emit(0)
-
+            self.hrv_updated.emit(0.0)
+            self.peaks_detected.emit([], []) # Clear red dots if sensor is off
+            
     def _handle_leads_off(self, is_off: bool):
         if is_off:
             self.sensor_status_changed.emit(False, "Electrode Disconnected (Leads-Off)!")
