@@ -5,8 +5,8 @@ import pyqtgraph as pg  # استيراد مكتبة الرسم السريع
 from Business_Logic.ecg_service import ECGService
 
 class ECGDashboard(QMainWindow):
-    def init(self):
-        super().init()
+    def __init__(self):
+        super().__init__()
         self.setWindowTitle("ECG Apnea Screening Dashboard")
         self.resize(1000, 600)
         
