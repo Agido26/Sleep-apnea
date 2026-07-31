@@ -55,7 +55,22 @@ class ECGService(QObject):
         y = filtfilt(b, a, data)
         return y
 
-    def _handle_raw_sample(self, raw_buffer: list):
+    def _handle_raw_sample(self, value: int):
+        """
+        Applies a lightweight Exponential Moving Average (EMA) filter here
+        before sending the sample to the UI for smooth, lag-free plotting.
+        """
+        if self.ema_value == 0.0:
+            self.ema_value = value  # Initialize on first sample
+        else:
+            # Formula: (New Value * alpha) + (Old Value * (1 - alpha))
+            self.ema_value = (self.ema_alpha * value) + ((1 - self.ema_alpha) * self.ema_value)
+            
+        # Send the smoothed integer to the UI dashboard
+        self.live_sample_ready.emit(int(self.ema_value))
+
+
+    def _analyze_10s_window(self, raw_buffer: list):
         """
         Core Deterministic Rule-Based Algorithm:
         Executes Bandpass Filter -> Peak Detection -> R-R Interval -> BPM -> Apnea Screening.
