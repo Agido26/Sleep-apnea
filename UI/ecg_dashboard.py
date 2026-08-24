@@ -1,7 +1,7 @@
 import sys
 from collections import deque
 from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 import pyqtgraph as pg  # استيراد مكتبة الرسم السريع
 from Business_Logic.ecg_service import ECGService
 
