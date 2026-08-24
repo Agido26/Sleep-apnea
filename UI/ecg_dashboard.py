@@ -1,4 +1,5 @@
 import sys
+from collections import deque
 from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout
 from PyQt6.QtCore import Qt
 import pyqtgraph as pg  # استيراد مكتبة الرسم السريع
@@ -84,14 +85,6 @@ class ECGDashboard(QMainWindow):
 
     def draw_graph(self):
         """تحديث الشاشة 30 مرة في الثانية فقط لتخفيف الضغط على المعالج"""
-        self.data_line.setData(self.plot_data)
-
-    def update_live_graph(self, value: int):
-        """تحديث الرسم البياني بسرعة البرق 250 مرة في الثانية"""
-        # إضافة القيمة الجديدة في نهاية المصفوفة وحذف أقدم قيمة
-        self.plot_data = self.plot_data[1:]
-        self.plot_data.append(value)
-        # تحديث الخط على الشاشة
         self.data_line.setData(self.plot_data)
 
     def update_sensor_status(self, is_ok: bool, message: str):
