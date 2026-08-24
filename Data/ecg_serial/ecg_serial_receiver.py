@@ -67,7 +67,7 @@ class ECGSerialReader(QThread):
                 
                 # Print live data to the terminal so you can verify it before the UI
                 sample_counter += 1
-                print(f"[LIVE SERIAL - {self.port}] Sample #{sample_counter} | Raw Value: {value}")
+               # print(f"[LIVE SERIAL - {self.port}] Sample #{sample_counter} | Raw Value: {value}")
                 
                 # Check for Leads-Off indicator (-1 sent by Arduino)
                 if value == -1 or value == 1023:

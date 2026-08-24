@@ -59,20 +59,32 @@ class ECGDashboard(QMainWindow):
         container.setLayout(main_layout)
         self.setCentralWidget(container)
 
-        # بيانات الرسم المؤقتة (لرسم آخر 1000 قراءة فقط لتجنب بطء الشاشة)
-        self.plot_data = [512] * 1000 
+       # deque automatically pushes out the oldest value when maxlen is reached
+        self.plot_data = deque([512] * 1000, maxlen=1000)
 
        # --- 3. Connect Business Layer Signals ---
         self.ecg_service = ECGService(port="COM3", baudrate=115200, sample_rate=250)
-        self.ecg_service.live_sample_ready.connect(self.update_live_graph)
+        self.ecg_service.live_sample_ready.connect(self.store_live_sample)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
         self.ecg_service.hrv_updated.connect(self.update_hrv)              # Connect HRV
         self.ecg_service.peaks_detected.connect(self.update_peaks_graph)   # Connect Red Dots
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
         self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
         
+        # --- NEW: QTimer to control frame rate (30 FPS) ---
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.draw_graph)
+        self.timer.start(33) # 33 milliseconds = ~30 Frames Per Second
         # Start the ECG monitoring thread
         self.ecg_service.start_monitoring()
+
+    def store_live_sample(self, value: int):
+        """تخزين القيمة الجديدة فقط في الذاكرة دون رسمها"""
+        self.plot_data.append(value)
+
+    def draw_graph(self):
+        """تحديث الشاشة 30 مرة في الثانية فقط لتخفيف الضغط على المعالج"""
+        self.data_line.setData(self.plot_data)
 
     def update_live_graph(self, value: int):
         """تحديث الرسم البياني بسرعة البرق 250 مرة في الثانية"""
