@@ -46,7 +46,6 @@ class ECGDashboard(QMainWindow):
 
         self.plot_data = deque([512] * 1000, maxlen=1000)
 
-        # Note: Ensure COM port matches your actual Arduino port
         self.ecg_service = ECGService(port="COM4", baudrate=115200, sample_rate=250)
         self.ecg_service.live_sample_ready.connect(self.store_live_sample)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
@@ -57,7 +56,7 @@ class ECGDashboard(QMainWindow):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self.draw_graph)
-        self.timer.start(33) # ~30 FPS
+        self.timer.start(33) 
 
         self.ecg_service.start_monitoring()
 
@@ -65,14 +64,36 @@ class ECGDashboard(QMainWindow):
         self.plot_data.append(value)
 
     def draw_graph(self):
-        # OPTIMIZATION: Convert deque to list for faster pyqtgraph C++ backend rendering
         self.data_line.setData(list(self.plot_data))
 
-    def update_sensor_status(self, is_ok: bool, message: str):
+       def update_sensor_status(self, is_ok: bool, message: str):
         self.status_label.setText(message)
-        color = "green" if is_ok else "orange"
-        self.status_label.setStyleSheet(f"font-size: 16px; color: {color}; font-weight: bold;")
-
+        
+        if not is_ok:
+            # 1. Show Red Warning
+            self.status_label.setStyleSheet("font-size: 16px; color: red; font-weight: bold;")
+            
+            # 2. [FIX] DO NOT clear the plot_data! 
+            # Let the real ECG waveform naturally scroll to the left and disappear over time.
+            # The background thread is now feeding '512' (flatline), so the new incoming 
+            # data will just draw a flat line, while the old data fades out naturally.
+            
+            # 3. Clear the Red Dots (Because there are no heartbeats right now, 
+            # keeping old dots would be misleading to the doctor)
+            self.peak_scatter.setData([], [])   
+            
+            # 4. Gray out the metrics so the user knows they are currently invalid
+            self.bpm_label.setText("BPM: -- (No Signal)")
+            self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: gray;")
+            self.hrv_label.setText("HRV (SDNN): -- ms")
+            self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: gray;")
+            
+        else:
+            # Sensor is reconnected
+            self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
+            # Restore normal colors when signal returns
+            self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
+            self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: purple;")
     def update_bpm(self, bpm: int):
         self.bpm_label.setText(f"BPM: {bpm}")
         color = "green" if 40 <= bpm <= 150 else "red"
