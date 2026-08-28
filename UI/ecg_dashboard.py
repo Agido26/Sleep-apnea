@@ -66,7 +66,7 @@ class ECGDashboard(QMainWindow):
     def draw_graph(self):
         self.data_line.setData(list(self.plot_data))
 
-       def update_sensor_status(self, is_ok: bool, message: str):
+    def update_sensor_status(self, is_ok: bool, message: str):
         self.status_label.setText(message)
         
         if not is_ok:
