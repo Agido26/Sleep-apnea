@@ -80,7 +80,7 @@ class ECGService(QObject):
             self.smoothed_buffer.pop(0)   
         
         # Send the smoothed integer to the UI dashboard
-        self.live_sample_ready.emit(int(self.smoothed_int))
+        self.live_sample_ready.emit(int(smoothed_int))
 
 
     def _analyze_10s_window(self, raw_buffer: list):
