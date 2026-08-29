@@ -7,8 +7,8 @@ import numpy as np
 from scipy.signal import find_peaks, butter, filtfilt
 
 class ECGSerialReader(QThread):
-    new_sample_ready = pyqtSignal(int)             
-    analysis_results = pyqtSignal(int, float, list, list) 
+    new_sample_ready = pyqtSignal(int)
+    buffer_updated = pyqtSignal(list, list)  # EMITS (raw_buffer, smoothed_buffer) - THIS WAS MISSING!
     leads_off_detected = pyqtSignal(bool)
     connection_error = pyqtSignal(str)
 
@@ -25,7 +25,7 @@ class ECGSerialReader(QThread):
         self.buffer_size = self.sample_rate * self.window_seconds 
         self.fifo_buffer = deque(maxlen=self.buffer_size)
         
-        # --- FIX: Trigger analysis every 1 SECOND (250 samples) instead of 10 ---
+        # Trigger analysis every 1 SECOND (250 samples) for instant peak detection
         self.analysis_trigger = self.sample_rate * 1 
         self.samples_since_last_analysis = 0 
         
@@ -45,31 +45,10 @@ class ECGSerialReader(QThread):
     def _analyze_window(self):
         """Executes in background thread every 1 second."""
         if len(self.fifo_buffer) < 50: 
-            self.analysis_results.emit(0, 0.0, [], [])
-            return
-
-        raw_data = np.array(list(self.fifo_buffer))
-        smoothed_data = np.array(list(self.smoothed_buffer))
+            return  # Not enough data
         
-        filtered_data = self._butter_bandpass_filter(raw_data)
-        threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
-        min_distance = int(self.sample_rate * 0.4)
-        peaks, _ = find_peaks(filtered_data, height=threshold, distance=min_distance)
-        
-        if len(peaks) > 1:
-            r_r_intervals = np.diff(peaks) / self.sample_rate
-            real_bpm = int(60 / np.mean(r_r_intervals))
-            hrv_sdnn = float(np.std(r_r_intervals * 1000.0))
-            
-            ui_window_size = 1000 
-            offset = len(raw_data) - ui_window_size 
-            
-            x_indices = [int(p - offset) for p in peaks if p >= offset]
-            y_values = [int(smoothed_data[p]) for p in peaks if p >= offset]
-            
-            self.analysis_results.emit(real_bpm, hrv_sdnn, x_indices, y_values)
-        else:
-            self.analysis_results.emit(0, 0.0, [], [])
+        # Emit the buffer to the Peak Detector Thread
+        self.buffer_updated.emit(list(self.fifo_buffer), list(self.smoothed_buffer))
 
     def run(self):
         try:
@@ -117,7 +96,7 @@ class ECGSerialReader(QThread):
                 # Send to UI for immediate plotting
                 self.new_sample_ready.emit(smoothed_int)
                 
-                # --- FIX: Trigger Analysis exactly every 1 second ---
+                # 2. Trigger Analysis exactly every 1 second
                 self.samples_since_last_analysis += 1
                 if self.samples_since_last_analysis >= self.analysis_trigger:
                     self.samples_since_last_analysis = 0 
