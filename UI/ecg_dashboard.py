@@ -45,6 +45,9 @@ class ECGDashboard(QMainWindow):
         self.setCentralWidget(container)
 
         self.plot_data = deque([512] * 1000, maxlen=1000)
+        
+        # NEW: Store peaks as [x, y] coordinates so they can scroll with the signal
+        self.current_peaks = [] 
 
         self.ecg_service = ECGService(port="COM4", baudrate=115200, sample_rate=250)
         self.ecg_service.live_sample_ready.connect(self.store_live_sample)
@@ -62,38 +65,40 @@ class ECGDashboard(QMainWindow):
 
     def store_live_sample(self, value: int):
         self.plot_data.append(value)
+        
+        # --- THE MAGIC FIX: Scroll existing peaks to the left by 1 pixel ---
+        for peak in self.current_peaks:
+            peak[0] -= 1
+            
+        # Remove peaks that have scrolled off the left side of the screen
+        self.current_peaks = [p for p in self.current_peaks if p[0] >= 0]
 
     def draw_graph(self):
         self.data_line.setData(list(self.plot_data))
+        
+        # Update red dots position on the screen
+        if self.current_peaks:
+            x_peaks = [p[0] for p in self.current_peaks]
+            y_peaks = [p[1] for p in self.current_peaks]
+            self.peak_scatter.setData(x_peaks, y_peaks)
+        else:
+            self.peak_scatter.setData([], [])
 
     def update_sensor_status(self, is_ok: bool, message: str):
         self.status_label.setText(message)
-        
         if not is_ok:
-            # 1. Show Red Warning
             self.status_label.setStyleSheet("font-size: 16px; color: red; font-weight: bold;")
-            
-            # 2. [FIX] DO NOT clear the plot_data! 
-            # Let the real ECG waveform naturally scroll to the left and disappear over time.
-            # The background thread is now feeding '512' (flatline), so the new incoming 
-            # data will just draw a flat line, while the old data fades out naturally.
-            
-            # 3. Clear the Red Dots (Because there are no heartbeats right now, 
-            # keeping old dots would be misleading to the doctor)
             self.peak_scatter.setData([], [])   
-            
-            # 4. Gray out the metrics so the user knows they are currently invalid
+            self.current_peaks = [] # Clear stored peaks when disconnected
             self.bpm_label.setText("BPM: -- (No Signal)")
             self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: gray;")
             self.hrv_label.setText("HRV (SDNN): -- ms")
             self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: gray;")
-            
         else:
-            # Sensor is reconnected
             self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
-            # Restore normal colors when signal returns
             self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
             self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: purple;")
+
     def update_bpm(self, bpm: int):
         self.bpm_label.setText(f"BPM: {bpm}")
         color = "green" if 40 <= bpm <= 150 else "red"
@@ -103,7 +108,10 @@ class ECGDashboard(QMainWindow):
         self.hrv_label.setText(f"HRV (SDNN): {hrv_value:.1f} ms")
 
     def update_peaks_graph(self, x_peaks: list, y_peaks: list):
-        self.peak_scatter.setData(x_peaks, y_peaks)
+        """Receives new peaks from backend and adds them to the scrolling list."""
+        # Add new peaks to our tracking list
+        for x, y in zip(x_peaks, y_peaks):
+            self.current_peaks.append([x, y])
 
     def update_apnea_status(self, is_apnea: bool, message: str):
         self.alert_label.setText(message)
@@ -114,3 +122,8 @@ class ECGDashboard(QMainWindow):
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)
 
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    dashboard = ECGDashboard()
+    dashboard.show()
+    sys.exit(app.exec())
