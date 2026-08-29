@@ -108,10 +108,24 @@ class ECGDashboard(QMainWindow):
         self.hrv_label.setText(f"HRV (SDNN): {hrv_value:.1f} ms")
 
     def update_peaks_graph(self, x_peaks: list, y_peaks: list):
-        """Receives new peaks from backend and adds them to the scrolling list."""
-        # Add new peaks to our tracking list
-        for x, y in zip(x_peaks, y_peaks):
-            self.current_peaks.append([x, y])
+        """Receives new peaks from backend and adds them to the scrolling list, 
+        but prevents duplicate dots for the same heartbeat."""
+        
+        for new_x, new_y in zip(x_peaks, y_peaks):
+            is_duplicate = False
+            
+            # Check if we already have a dot very close to this new peak
+            for i, existing_peak in enumerate(self.current_peaks):
+                # If the new peak is within 30 samples of an existing peak, it's the same heartbeat
+                if abs(existing_peak[0] - new_x) < 30:
+                    # Update the existing peak's position to the newest calculation
+                    self.current_peaks[i] = [new_x, new_y]
+                    is_duplicate = True
+                    break
+            
+            # Only add a new dot if it's a genuinely new heartbeat
+            if not is_duplicate:
+                self.current_peaks.append([new_x, new_y])
 
     def update_apnea_status(self, is_apnea: bool, message: str):
         self.alert_label.setText(message)
