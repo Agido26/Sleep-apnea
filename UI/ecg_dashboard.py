@@ -8,22 +8,26 @@ from Business_Logic.ecg_service import ECGService
 class ECGDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ECG Apnea Screening Dashboard")
+        self.setWindowTitle("ECG Apnea Screening Dashboard - RR Test")
         self.resize(1000, 600)
 
         main_layout = QVBoxLayout()
         info_layout = QHBoxLayout()
 
         self.status_label = QLabel("Status: Connecting...")
+        
         self.bpm_label = QLabel("BPM: --")
         self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
+        
+        # NEW: RR Interval Label
+        self.rr_label = QLabel("RR: -- ms")
+        self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
+        
         self.alert_label = QLabel("Apnea Status: Analyzing...")
-        self.hrv_label = QLabel("HRV (SDNN): -- ms")
-        self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: purple;")
 
         info_layout.addWidget(self.status_label)
         info_layout.addWidget(self.bpm_label)
-        info_layout.addWidget(self.hrv_label)
+        info_layout.addWidget(self.rr_label)
         info_layout.addWidget(self.alert_label)
         main_layout.addLayout(info_layout)
 
@@ -45,14 +49,12 @@ class ECGDashboard(QMainWindow):
         self.setCentralWidget(container)
 
         self.plot_data = deque([512] * 1000, maxlen=1000)
-        
-        # NEW: Store peaks as [x, y] coordinates so they can scroll with the signal
         self.current_peaks = [] 
 
         self.ecg_service = ECGService(port="COM4", baudrate=115200, sample_rate=250)
         self.ecg_service.live_sample_ready.connect(self.store_live_sample)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
-        self.ecg_service.hrv_updated.connect(self.update_hrv)
+        self.ecg_service.rr_updated.connect(self.update_rr)  # NEW
         self.ecg_service.peaks_detected.connect(self.update_peaks_graph)
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
         self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
@@ -65,18 +67,12 @@ class ECGDashboard(QMainWindow):
 
     def store_live_sample(self, value: int):
         self.plot_data.append(value)
-        
-        # --- THE MAGIC FIX: Scroll existing peaks to the left by 1 pixel ---
         for peak in self.current_peaks:
             peak[0] -= 1
-            
-        # Remove peaks that have scrolled off the left side of the screen
         self.current_peaks = [p for p in self.current_peaks if p[0] >= 0]
 
     def draw_graph(self):
         self.data_line.setData(list(self.plot_data))
-        
-        # Update red dots position on the screen
         if self.current_peaks:
             x_peaks = [p[0] for p in self.current_peaks]
             y_peaks = [p[1] for p in self.current_peaks]
@@ -89,41 +85,33 @@ class ECGDashboard(QMainWindow):
         if not is_ok:
             self.status_label.setStyleSheet("font-size: 16px; color: red; font-weight: bold;")
             self.peak_scatter.setData([], [])   
-            self.current_peaks = [] # Clear stored peaks when disconnected
-            self.bpm_label.setText("BPM: -- (No Signal)")
-            self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: gray;")
-            self.hrv_label.setText("HRV (SDNN): -- ms")
-            self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: gray;")
+            self.current_peaks = []
+            self.bpm_label.setText("BPM: --")
+            self.rr_label.setText("RR: -- ms")
         else:
             self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
-            self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
-            self.hrv_label.setStyleSheet("font-size: 22px; font-weight: bold; color: purple;")
 
     def update_bpm(self, bpm: int):
         self.bpm_label.setText(f"BPM: {bpm}")
         color = "green" if 40 <= bpm <= 150 else "red"
         self.bpm_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
 
-    def update_hrv(self, hrv_value: float):
-        self.hrv_label.setText(f"HRV (SDNN): {hrv_value:.1f} ms")
+    # NEW: Update RR Label
+    def update_rr(self, rr_intervals_ms: list):
+        if rr_intervals_ms:
+            # Show the most recent RR interval
+            latest_rr = rr_intervals_ms[-1]
+            self.rr_label.setText(f"RR: {latest_rr:.0f} ms")
+            self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
 
     def update_peaks_graph(self, x_peaks: list, y_peaks: list):
-        """Receives new peaks from backend and adds them to the scrolling list, 
-        but prevents duplicate dots for the same heartbeat."""
-        
         for new_x, new_y in zip(x_peaks, y_peaks):
             is_duplicate = False
-            
-            # Check if we already have a dot very close to this new peak
             for i, existing_peak in enumerate(self.current_peaks):
-                # If the new peak is within 30 samples of an existing peak, it's the same heartbeat
                 if abs(existing_peak[0] - new_x) < 30:
-                    # Update the existing peak's position to the newest calculation
                     self.current_peaks[i] = [new_x, new_y]
                     is_duplicate = True
                     break
-            
-            # Only add a new dot if it's a genuinely new heartbeat
             if not is_duplicate:
                 self.current_peaks.append([new_x, new_y])
 
@@ -136,8 +124,3 @@ class ECGDashboard(QMainWindow):
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)
 
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    dashboard = ECGDashboard()
-    dashboard.show()
-    sys.exit(app.exec())
