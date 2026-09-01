@@ -123,4 +123,3 @@ class ECGDashboard(QMainWindow):
     def closeEvent(self, event):
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)
-
