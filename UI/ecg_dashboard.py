@@ -8,7 +8,7 @@ from Business_Logic.ecg_service import ECGService
 class ECGDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ECG Apnea Screening Dashboard - RR Test")
+        self.setWindowTitle("ECG Apnea Screening Dashboard - EDR Test")
         self.resize(1000, 600)
 
         main_layout = QVBoxLayout()
@@ -19,15 +19,19 @@ class ECGDashboard(QMainWindow):
         self.bpm_label = QLabel("BPM: --")
         self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
         
-        # NEW: RR Interval Label
         self.rr_label = QLabel("RR: -- ms")
         self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
+        
+        # NEW: Respiratory Rate Label
+        self.resp_label = QLabel("Resp: -- BrPM")
+        self.resp_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkgreen;")
         
         self.alert_label = QLabel("Apnea Status: Analyzing...")
 
         info_layout.addWidget(self.status_label)
         info_layout.addWidget(self.bpm_label)
         info_layout.addWidget(self.rr_label)
+        info_layout.addWidget(self.resp_label) # Added to layout
         info_layout.addWidget(self.alert_label)
         main_layout.addLayout(info_layout)
 
@@ -54,7 +58,8 @@ class ECGDashboard(QMainWindow):
         self.ecg_service = ECGService(port="COM4", baudrate=115200, sample_rate=250)
         self.ecg_service.live_sample_ready.connect(self.store_live_sample)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
-        self.ecg_service.rr_updated.connect(self.update_rr)  # NEW
+        self.ecg_service.rr_updated.connect(self.update_rr)
+        self.ecg_service.edr_updated.connect(self.update_resp) # NEW
         self.ecg_service.peaks_detected.connect(self.update_peaks_graph)
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
         self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
@@ -88,6 +93,7 @@ class ECGDashboard(QMainWindow):
             self.current_peaks = []
             self.bpm_label.setText("BPM: --")
             self.rr_label.setText("RR: -- ms")
+            self.resp_label.setText("Resp: -- BrPM") # Reset Resp
         else:
             self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
 
@@ -96,13 +102,16 @@ class ECGDashboard(QMainWindow):
         color = "green" if 40 <= bpm <= 150 else "red"
         self.bpm_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
 
-    # NEW: Update RR Label
     def update_rr(self, rr_intervals_ms: list):
         if rr_intervals_ms:
-            # Show the most recent RR interval
             latest_rr = rr_intervals_ms[-1]
             self.rr_label.setText(f"RR: {latest_rr:.0f} ms")
             self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
+
+    # NEW: Update Respiratory Rate Label
+    def update_resp(self, brpm: float):
+        self.resp_label.setText(f"Resp: {brpm:.1f} BrPM")
+        self.resp_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkgreen;")
 
     def update_peaks_graph(self, x_peaks: list, y_peaks: list):
         for new_x, new_y in zip(x_peaks, y_peaks):
@@ -123,3 +132,9 @@ class ECGDashboard(QMainWindow):
     def closeEvent(self, event):
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    dashboard = ECGDashboard()
+    dashboard.show()
+    sys.exit(app.exec())
