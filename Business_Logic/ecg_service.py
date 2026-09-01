@@ -1,144 +1,188 @@
-import sys
-from collections import deque
-from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout
-from PyQt6.QtCore import Qt, QTimer
-import pyqtgraph as pg
-from Business_Logic.ecg_service import ECGService
+import queue
+from PyQt6.QtCore import QObject, pyqtSignal, QThread
+from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
+import numpy as np
+from scipy.signal import find_peaks, butter, filtfilt
+from scipy.interpolate import interp1d
 
-class ECGDashboard(QMainWindow):
-    def __init__(self):
+class ECGPeakDetector(QThread):
+    """Thread 2: Finds peaks, calculates RR, and extracts EDR (Respiration)."""
+    # Emits: (bpm, x_peaks_ui, y_peaks_ui, rr_intervals_ms, edr_time, edr_signal, breath_x, breath_y)
+    analysis_results = pyqtSignal(int, list, list, list, list, list, list, list) 
+    
+    def __init__(self, sample_rate=250):
         super().__init__()
-        self.setWindowTitle("ECG Apnea Screening Dashboard - EDR Visualization")
-        self.resize(1000, 800) # Made window taller to fit two graphs
+        self.sample_rate = sample_rate
+        self.data_queue = queue.Queue()
+        self.is_running = True
+        
+        # Robust RR Tracking
+        self.absolute_sample_count = 0 
+        self.last_peak_absolute_time = 0 
+        
+        # EDR (Respiration) Tracking
+        self.edr_times = []
+        self.edr_amps = []
 
-        main_layout = QVBoxLayout()
-        info_layout = QHBoxLayout()
+    def add_buffer(self, raw_buffer, smoothed_buffer):
+        self.data_queue.put((raw_buffer, smoothed_buffer))
 
-        self.status_label = QLabel("Status: Connecting...")
-        self.bpm_label = QLabel("BPM: --")
-        self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
-        self.rr_label = QLabel("RR: -- ms")
-        self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
-        self.alert_label = QLabel("Apnea Status: Analyzing...")
+    def _butter_bandpass_filter(self, data, lowcut, highcut, fs, order=3):
+        nyquist = 0.5 * fs
+        low = lowcut / nyquist
+        high = highcut / nyquist
+        b, a = butter(order, [low, high], btype='band')
+        return filtfilt(b, a, data)
 
-        info_layout.addWidget(self.status_label)
-        info_layout.addWidget(self.bpm_label)
-        info_layout.addWidget(self.rr_label)
-        info_layout.addWidget(self.alert_label)
-        main_layout.addLayout(info_layout)
+    def run(self):
+        while self.is_running:
+            try:
+                raw_buffer, smoothed_buffer = self.data_queue.get(timeout=1)
+                self._process_buffer(raw_buffer, smoothed_buffer)
+            except queue.Empty:
+                continue
 
-        # --- GRAPH 1: ECG ---
-        self.ecg_graph = pg.PlotWidget()
-        self.ecg_graph.setBackground('w')
-        self.ecg_graph.setTitle("Real-Time ECG with R-Peaks", color="k", size="15pt")
-        self.ecg_graph.showGrid(x=True, y=True)
-        self.ecg_graph.setYRange(0, 1023)
+    def _process_buffer(self, raw_buffer, smoothed_buffer):
+        raw_data = np.array(raw_buffer)
+        smoothed_data = np.array(smoothed_buffer)
+        
+        # 1. Filter & Detect Peaks
+        filtered_data = self._butter_bandpass_filter(raw_data, 0.5, 40.0, self.sample_rate)
+        threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
+        min_distance = int(self.sample_rate * 0.4)
+        peaks, _ = find_peaks(filtered_data, height=threshold, distance=min_distance)
+        
+        if len(peaks) > 0:
+            absolute_peaks = [int(p) + self.absolute_sample_count for p in peaks]
+            
+            # --- EDR: Extract Amplitudes and Absolute Times ---
+            new_amps = [float(filtered_data[p]) for p in peaks]
+            new_times = [float(p) / self.sample_rate for p in absolute_peaks]
+            
+            self.edr_amps.extend(new_amps)
+            self.edr_times.extend(new_times)
+            
+            # Keep only the last 60 seconds for EDR calculation
+            if self.edr_times:
+                cutoff = self.edr_times[-1] - 60.0
+                valid_data = [(t, a) for t, a in zip(self.edr_times, self.edr_amps) if t > cutoff]
+                self.edr_times = [v[0] for v in valid_data]
+                self.edr_amps = [v[1] for v in valid_data]
 
-        pen_ecg = pg.mkPen(color='b', width=2)
-        self.ecg_line = self.ecg_graph.plot([], [], pen=pen_ecg, name="ECG Signal")
-        self.peak_scatter = self.ecg_graph.plot([], [], pen=None, symbol='o', 
-                                                symbolBrush='r', symbolSize=10, name="R-Peaks")
-        main_layout.addWidget(self.ecg_graph)
+            # --- Robust RR Calculation ---
+            rr_intervals_ms = []
+            if self.last_peak_absolute_time > 0:
+                rr_time_sec = (absolute_peaks[0] - self.last_peak_absolute_time) / self.sample_rate
+                rr_ms = rr_time_sec * 1000.0
+                if 300 < rr_ms < 2000: rr_intervals_ms.append(rr_ms)
+            
+            for i in range(1, len(absolute_peaks)):
+                rr_time_sec = (absolute_peaks[i] - absolute_peaks[i-1]) / self.sample_rate
+                rr_ms = rr_time_sec * 1000.0
+                if 300 < rr_ms < 2000: rr_intervals_ms.append(rr_ms)
+            
+            self.last_peak_absolute_time = absolute_peaks[-1]
+            self.absolute_sample_count += len(raw_data)
+            
+            latest_rr_sec = rr_intervals_ms[-1] / 1000.0 if rr_intervals_ms else 1.0
+            real_bpm = int(60 / latest_rr_sec) if rr_intervals_ms else 0
+            
+            # Map ECG peaks to UI (1000 samples)
+            ui_window_size = 1000  
+            offset = len(raw_data) - ui_window_size  
+            x_indices = [int(p - offset) for p in peaks if p >= offset]
+            y_values = [int(smoothed_data[p]) for p in peaks if p >= offset]
+            
+            # --- EDR: Interpolate, Filter, and Find Breath Peaks ---
+            edr_t_ui, edr_signal_ui, breath_x, breath_y = [], [], [], []
+            
+            if len(self.edr_times) > 10:
+                try:
+                    # Interpolate to uniform 4Hz sampling rate
+                    f = interp1d(self.edr_times, self.edr_amps, kind='cubic', fill_value="extrapolate")
+                    t_uniform = np.arange(self.edr_times[0], self.edr_times[-1], 0.25) 
+                    edr_signal = f(t_uniform)
+                    
+                    # Respiratory Bandpass Filter (0.15Hz - 0.4Hz)
+                    edr_filtered = self._butter_bandpass_filter(edr_signal, 0.15, 0.4, 4.0)
+                    
+                    # Find breath peaks (minimum distance ~1.5s = 6 samples at 4Hz)
+                    breath_peaks, _ = find_peaks(edr_filtered, distance=6)
+                    
+                    # Map to UI (Show last 30 seconds of respiration)
+                    ui_cutoff = t_uniform[-1] - 30.0
+                    ui_mask = t_uniform >= ui_cutoff
+                    
+                    edr_t_ui = t_uniform[ui_mask].tolist()
+                    edr_signal_ui = edr_filtered[ui_mask].tolist()
+                    
+                    for bp in breath_peaks:
+                        if t_uniform[bp] >= ui_cutoff:
+                            breath_x.append(t_uniform[bp])
+                            breath_y.append(edr_filtered[bp])
+                            
+                except Exception:
+                    pass # Interpolation can fail on edge cases
 
-        # --- GRAPH 2: EDR (Respiration) ---
-        self.edr_graph = pg.PlotWidget()
-        self.edr_graph.setBackground('w')
-        self.edr_graph.setTitle("ECG-Derived Respiration (EDR) - Last 30 Seconds", color="k", size="15pt")
-        self.edr_graph.showGrid(x=True, y=True)
-        self.edr_graph.setLabel('bottom', 'Time', units='s')
-        self.edr_graph.setLabel('left', 'Amplitude')
-
-        pen_edr = pg.mkPen(color='g', width=2)
-        self.edr_line = self.edr_graph.plot([], [], pen=pen_edr, name="Respiratory Signal")
-        self.breath_scatter = self.edr_graph.plot([], [], pen=None, symbol='o', 
-                                                  symbolBrush='y', symbolSize=12, name="Breath Peaks")
-        main_layout.addWidget(self.edr_graph)
-
-        container = QWidget()
-        container.setLayout(main_layout)
-        self.setCentralWidget(container)
-
-        self.plot_data = deque([512] * 1000, maxlen=1000)
-        self.current_peaks = [] 
-
-        self.ecg_service = ECGService(port="COM4", baudrate=115200, sample_rate=250)
-        self.ecg_service.live_sample_ready.connect(self.store_live_sample)
-        self.ecg_service.bpm_updated.connect(self.update_bpm)
-        self.ecg_service.rr_updated.connect(self.update_rr)
-        self.ecg_service.peaks_detected.connect(self.update_peaks_graph)
-        self.ecg_service.edr_graph_updated.connect(self.update_edr_graph) # NEW
-        self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
-        self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.draw_graph)
-        self.timer.start(33) 
-
-        self.ecg_service.start_monitoring()
-
-    def store_live_sample(self, value: int):
-        self.plot_data.append(value)
-        for peak in self.current_peaks:
-            peak[0] -= 1
-        self.current_peaks = [p for p in self.current_peaks if p[0] >= 0]
-
-    def draw_graph(self):
-        self.ecg_line.setData(list(self.plot_data))
-        if self.current_peaks:
-            x_peaks = [p[0] for p in self.current_peaks]
-            y_peaks = [p[1] for p in self.current_peaks]
-            self.peak_scatter.setData(x_peaks, y_peaks)
+            self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
+                                       edr_t_ui, edr_signal_ui, breath_x, breath_y)
         else:
-            self.peak_scatter.setData([], [])
+            self.absolute_sample_count += len(raw_data)
+            self.analysis_results.emit(0, [], [], [], [], [], [], [])
 
-    # NEW: Update EDR Graph
-    def update_edr_graph(self, t_data, edr_data, breath_x, breath_y):
-        self.edr_line.setData(t_data, edr_data)
-        self.breath_scatter.setData(breath_x, breath_y)
+    def stop(self):
+        self.is_running = False
+        self.wait()
 
-    def update_sensor_status(self, is_ok: bool, message: str):
-        self.status_label.setText(message)
-        if not is_ok:
-            self.status_label.setStyleSheet("font-size: 16px; color: red; font-weight: bold;")
-            self.peak_scatter.setData([], [])   
-            self.current_peaks = []
-            self.bpm_label.setText("BPM: --")
-            self.rr_label.setText("RR: -- ms")
+
+class ECGService(QObject):
+    """Coordinates threads and routes data to UI"""
+    live_sample_ready = pyqtSignal(int)
+    bpm_updated = pyqtSignal(int)
+    rr_updated = pyqtSignal(list)
+    edr_graph_updated = pyqtSignal(list, list, list, list) # NEW: (time, signal, breath_x, breath_y)
+    peaks_detected = pyqtSignal(list, list)
+    sensor_status_changed = pyqtSignal(bool, str)
+
+    def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
+        super().__init__()
+        self.sample_rate = sample_rate
+        
+        self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
+        self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
+        self.peak_detector.start()
+        
+        self.reader.new_sample_ready.connect(self.live_sample_ready.emit)
+        self.reader.buffer_updated.connect(self.peak_detector.add_buffer)
+        self.peak_detector.analysis_results.connect(self._handle_analysis_results)
+        self.reader.leads_off_detected.connect(self._handle_leads_off)
+        self.reader.connection_error.connect(self._handle_connection_error)
+
+    def start_monitoring(self):
+        self.reader.start()
+
+    def stop_monitoring(self):
+        self.reader.stop()
+        self.peak_detector.stop()
+
+    def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
+                                 edr_t, edr_sig, breath_x, breath_y):
+        self.bpm_updated.emit(bpm)
+        self.rr_updated.emit(rr_intervals_ms)
+        self.peaks_detected.emit(x_peaks, y_peaks)
+        
+        # Emit EDR data to UI
+        if edr_t:
+            self.edr_graph_updated.emit(edr_t, edr_sig, breath_x, breath_y)
+
+    def _handle_leads_off(self, is_off: bool):
+        if is_off:
+            self.sensor_status_changed.emit(False, "Electrode Disconnected!")
+            self.peak_detector.last_peak_absolute_time = 0
+            self.peak_detector.edr_times = []
+            self.peak_detector.edr_amps = []
         else:
-            self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
+            self.sensor_status_changed.emit(True, "Sensor Connected Normally")
 
-    def update_bpm(self, bpm: int):
-        self.bpm_label.setText(f"BPM: {bpm}")
-        color = "green" if 40 <= bpm <= 150 else "red"
-        self.bpm_label.setStyleSheet(f"font-size: 24px; font-weight: bold; color: {color};")
-
-    def update_rr(self, rr_intervals_ms: list):
-        if rr_intervals_ms:
-            latest_rr = rr_intervals_ms[-1]
-            self.rr_label.setText(f"RR: {latest_rr:.0f} ms")
-
-    def update_peaks_graph(self, x_peaks: list, y_peaks: list):
-        for new_x, new_y in zip(x_peaks, y_peaks):
-            is_duplicate = False
-            for i, existing_peak in enumerate(self.current_peaks):
-                if abs(existing_peak[0] - new_x) < 30:
-                    self.current_peaks[i] = [new_x, new_y]
-                    is_duplicate = True
-                    break
-            if not is_duplicate:
-                self.current_peaks.append([new_x, new_y])
-
-    def update_apnea_status(self, is_apnea: bool, message: str):
-        self.alert_label.setText(message)
-        color = "red" if is_apnea else "green"
-        self.alert_label.setStyleSheet(f"font-size: 18px; color: {color}; font-weight: bold;")
-
-    def closeEvent(self, event):
-        self.ecg_service.stop_monitoring()
-        super().closeEvent(event)
-
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    dashboard = ECGDashboard()
-    dashboard.show()
-    sys.exit(app.exec())
+    def _handle_connection_error(self, error_msg: str):
+        self.sensor_status_changed.emit(False, f"Error: {error_msg}")
