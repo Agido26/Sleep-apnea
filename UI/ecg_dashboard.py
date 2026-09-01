@@ -8,22 +8,30 @@ from Business_Logic.ecg_service import ECGService
 class ECGDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("ECG Apnea Screening Dashboard - EDR Visualization")
-        self.resize(1000, 800) # Made window taller to fit two graphs
+        self.setWindowTitle("ECG Apnea Screening Dashboard")
+        self.resize(1000, 800) 
 
         main_layout = QVBoxLayout()
         info_layout = QHBoxLayout()
 
         self.status_label = QLabel("Status: Connecting...")
+        
         self.bpm_label = QLabel("BPM: --")
         self.bpm_label.setStyleSheet("font-size: 24px; font-weight: bold; color: blue;")
+        
         self.rr_label = QLabel("RR: -- ms")
         self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
+        
+        # NEW: Respiratory Rate Label (Breaths Per Minute)
+        self.resp_label = QLabel("Resp: -- BrPM")
+        self.resp_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkgreen;")
+        
         self.alert_label = QLabel("Apnea Status: Analyzing...")
 
         info_layout.addWidget(self.status_label)
         info_layout.addWidget(self.bpm_label)
         info_layout.addWidget(self.rr_label)
+        info_layout.addWidget(self.resp_label) # Added to layout
         info_layout.addWidget(self.alert_label)
         main_layout.addLayout(info_layout)
 
@@ -65,8 +73,9 @@ class ECGDashboard(QMainWindow):
         self.ecg_service.live_sample_ready.connect(self.store_live_sample)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
         self.ecg_service.rr_updated.connect(self.update_rr)
+        self.ecg_service.brpm_updated.connect(self.update_resp) # NEW
         self.ecg_service.peaks_detected.connect(self.update_peaks_graph)
-        self.ecg_service.edr_graph_updated.connect(self.update_edr_graph) # NEW
+        self.ecg_service.edr_graph_updated.connect(self.update_edr_graph) 
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
         self.ecg_service.sensor_status_changed.connect(self.update_sensor_status)
 
@@ -91,7 +100,6 @@ class ECGDashboard(QMainWindow):
         else:
             self.peak_scatter.setData([], [])
 
-    # NEW: Update EDR Graph
     def update_edr_graph(self, t_data, edr_data, breath_x, breath_y):
         self.edr_line.setData(t_data, edr_data)
         self.breath_scatter.setData(breath_x, breath_y)
@@ -104,6 +112,7 @@ class ECGDashboard(QMainWindow):
             self.current_peaks = []
             self.bpm_label.setText("BPM: --")
             self.rr_label.setText("RR: -- ms")
+            self.resp_label.setText("Resp: -- BrPM") # Reset Resp
         else:
             self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
 
@@ -116,6 +125,14 @@ class ECGDashboard(QMainWindow):
         if rr_intervals_ms:
             latest_rr = rr_intervals_ms[-1]
             self.rr_label.setText(f"RR: {latest_rr:.0f} ms")
+
+    # NEW: Update Respiratory Rate Label
+    def update_resp(self, brpm: float):
+        if brpm > 0:
+            self.resp_label.setText(f"Resp: {brpm:.1f} BrPM")
+            self.resp_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkgreen;")
+        else:
+            self.resp_label.setText("Resp: -- BrPM")
 
     def update_peaks_graph(self, x_peaks: list, y_peaks: list):
         for new_x, new_y in zip(x_peaks, y_peaks):

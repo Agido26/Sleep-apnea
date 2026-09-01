@@ -7,8 +7,8 @@ from scipy.interpolate import interp1d
 
 class ECGPeakDetector(QThread):
     """Thread 2: Finds peaks, calculates RR, and extracts EDR (Respiration)."""
-    # Emits: (bpm, x_peaks_ui, y_peaks_ui, rr_intervals_ms, edr_time, edr_signal, breath_x, breath_y)
-    analysis_results = pyqtSignal(int, list, list, list, list, list, list, list) 
+    # Emits: (bpm, x_peaks_ui, y_peaks_ui, rr_intervals_ms, edr_time, edr_signal, breath_x, breath_y, brpm)
+    analysis_results = pyqtSignal(int, list, list, list, list, list, list, list, float) 
     
     def __init__(self, sample_rate=250):
         super().__init__()
@@ -95,6 +95,7 @@ class ECGPeakDetector(QThread):
             
             # --- EDR: Interpolate, Filter, and Find Breath Peaks ---
             edr_t_ui, edr_signal_ui, breath_x, breath_y = [], [], [], []
+            brpm = 0.0 # NEW: Breaths Per Minute
             
             if len(self.edr_times) > 10:
                 try:
@@ -109,6 +110,17 @@ class ECGPeakDetector(QThread):
                     # Find breath peaks (minimum distance ~1.5s = 6 samples at 4Hz)
                     breath_peaks, _ = find_peaks(edr_filtered, distance=6)
                     
+                    # --- NEW: Calculate Breaths Per Minute (BrPM) ---
+                    if len(breath_peaks) > 1:
+                        # Time between breaths in seconds (since sampling rate is 4Hz, 1 sample = 0.25s)
+                        breath_intervals_sec = np.diff(breath_peaks) * 0.25 
+                        avg_interval = np.mean(breath_intervals_sec)
+                        brpm = 60.0 / avg_interval
+                        
+                        # Sanity check: Normal human breathing is 10-25 BrPM
+                        if not (8.0 < brpm < 30.0):
+                            brpm = 0.0
+
                     # Map to UI (Show last 30 seconds of respiration)
                     ui_cutoff = t_uniform[-1] - 30.0
                     ui_mask = t_uniform >= ui_cutoff
@@ -124,11 +136,12 @@ class ECGPeakDetector(QThread):
                 except Exception:
                     pass # Interpolation can fail on edge cases
 
+            # Emit everything including the new brpm
             self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
-                                       edr_t_ui, edr_signal_ui, breath_x, breath_y)
+                                       edr_t_ui, edr_signal_ui, breath_x, breath_y, brpm)
         else:
             self.absolute_sample_count += len(raw_data)
-            self.analysis_results.emit(0, [], [], [], [], [], [], [])
+            self.analysis_results.emit(0, [], [], [], [], [], [], [], 0.0)
 
     def stop(self):
         self.is_running = False
@@ -140,9 +153,9 @@ class ECGService(QObject):
     live_sample_ready = pyqtSignal(int)
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
+    brpm_updated = pyqtSignal(float) # NEW: Emits Breaths Per Minute
+    edr_graph_updated = pyqtSignal(list, list, list, list) 
     peaks_detected = pyqtSignal(list, list)
-    edr_graph_updated = pyqtSignal(list, list, list, list)  # <-- ADD THIS! (time, signal, breath_x, breath_y)
-    apnea_warning_triggered = pyqtSignal(bool, str)           # <-- ADD THIS!
     sensor_status_changed = pyqtSignal(bool, str)
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
@@ -167,9 +180,10 @@ class ECGService(QObject):
         self.peak_detector.stop()
 
     def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
-                                 edr_t, edr_sig, breath_x, breath_y):
+                                 edr_t, edr_sig, breath_x, breath_y, brpm):
         self.bpm_updated.emit(bpm)
         self.rr_updated.emit(rr_intervals_ms)
+        self.brpm_updated.emit(brpm) # NEW: Send BrPM to UI
         self.peaks_detected.emit(x_peaks, y_peaks)
         
         # Emit EDR data to UI
