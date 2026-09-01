@@ -139,9 +139,9 @@ class ECGService(QObject):
     """Coordinates threads and routes data to UI"""
     live_sample_ready = pyqtSignal(int)
     bpm_updated = pyqtSignal(int)
-    rr_updated = pyqtSignal(list)
-    edr_graph_updated = pyqtSignal(list, list, list, list) # NEW: (time, signal, breath_x, breath_y)
+    rr_updated = pyqtSignal(list)  # NEW: Emits list of RR intervals in ms
     peaks_detected = pyqtSignal(list, list)
+    apnea_warning_triggered = pyqtSignal(bool, str)  # <-- ADD THIS LINE!
     sensor_status_changed = pyqtSignal(bool, str)
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
