@@ -68,7 +68,7 @@ class ECGDashboard(QMainWindow):
 
         self.plot_data = deque([512] * 1000, maxlen=1000)
         self.current_peaks = [] 
-        self.ecg_service= ECGService(port="COM4", baudrate=115200, sample_rate=250, window_seconds=10)
+        self.ecg_service= ECGService(port="COM4", baudrate=115200, sample_rate=250)
         # ربط الدالة الجديدة الخاصة بالـ Chunk
         self.ecg_service.live_chunk_ready.connect(self.store_live_chunk)
         
