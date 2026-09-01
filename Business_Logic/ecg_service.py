@@ -93,10 +93,9 @@ class ECGPeakDetector(QThread):
             x_indices = [int(p - offset) for p in peaks if p >= offset]
             y_values = [int(smoothed_data[p]) for p in peaks if p >= offset]
             
-            # --- EDR: Interpolate, Filter, and Find Breath Peaks ---
             edr_t_ui, edr_signal_ui, breath_x, breath_y = [], [], [], []
             brpm = 0.0
-            
+
             if len(self.edr_times) > 10:
                 try:
                     # Interpolate to uniform 4Hz sampling rate
@@ -104,21 +103,29 @@ class ECGPeakDetector(QThread):
                     t_uniform = np.arange(self.edr_times[0], self.edr_times[-1], 0.25) 
                     edr_signal = f(t_uniform)
                     
-                    # Respiratory Bandpass Filter (0.15Hz - 0.4Hz)
-                    edr_filtered = self._butter_bandpass_filter(edr_signal, 0.15, 0.4, 4.0)
+                    # التعديل 1: توسيع الفلتر ليسمح بترددات من 3 أنفاس (0.05Hz) إلى 36 نفساً (0.6Hz)
+                    edr_filtered = self._butter_bandpass_filter(edr_signal, 0.05, 0.6, 4.0)
                     
-                    # Find breath peaks (minimum distance ~1.5s = 6 samples at 4Hz)
-                    breath_peaks, _ = find_peaks(edr_filtered, distance=6)
+                    # التعديل 2: حساب الانحراف المعياري للإشارة لمعرفة هل هناك تنفس حقيقي أم كتم نفس (مسطح)
+                    signal_std = np.std(edr_filtered)
+                    
+                    # التعديل 3: إضافة prominence للبحث عن القمم الواضحة فقط وتجاهل الضوضاء أثناء كتم النفس
+                    # إذا كانت الإشارة مسطحة (كتم نفس)، لن يجد قمم.
+                    breath_peaks, _ = find_peaks(edr_filtered, distance=6, prominence=signal_std * 0.6)
                     
                     # --- Calculate Breaths Per Minute (BrPM) ---
-                    if len(breath_peaks) > 1:
+                    # نتأكد أولاً أن الإشارة فيها تباين كافٍ (ليست حالة انقطاع نفس تام)
+                    if len(breath_peaks) > 1 and signal_std > 0.5: 
                         breath_intervals_sec = np.diff(breath_peaks) * 0.25 
                         avg_interval = np.mean(breath_intervals_sec)
                         brpm = 60.0 / avg_interval
                         
-                        # Sanity check: Normal human breathing is 10-25 BrPM
-                        if not (8.0 < brpm < 30.0):
+                        # Sanity check: إزالة القيود الضيقة
+                        if not (3.0 < brpm < 40.0):
                             brpm = 0.0
+                    else:
+                        # حالة كتم النفس (Apnea) - تباين الإشارة ضعيف جداً أو لا يوجد قمم
+                        brpm = 0.0
 
                     # Map to UI (Show last 30 seconds of respiration)
                     ui_cutoff = t_uniform[-1] - 30.0
@@ -130,17 +137,15 @@ class ECGPeakDetector(QThread):
                     for bp in breath_peaks:
                         if t_uniform[bp] >= ui_cutoff:
                             breath_x.append(t_uniform[bp])
-                            breath_y.append(edr_filtered[bp])
-                            
-                except Exception:
-                    pass
-
-            # Emit everything including the new brpm
-            self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
+                            breath_y.append(edr_filtered[bp])            
+                except Exception as e:
+                    print(f"EDR Calculation Error: {e}") # لطباعة أي خطأ بدلاً من تجاهله
+                # Emit everything including the new brpm
+                self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
                                        edr_t_ui, edr_signal_ui, breath_x, breath_y, brpm)
-        else:
-            self.absolute_sample_count += len(raw_data)
-            self.analysis_results.emit(0, [], [], [], [], [], [], [], 0.0)
+            else:
+                self.absolute_sample_count += len(raw_data)
+                self.analysis_results.emit(0, [], [], [], [], [], [], [], 0.0)
 
     def stop(self):
         self.is_running = False
@@ -149,14 +154,14 @@ class ECGPeakDetector(QThread):
 
 class ECGService(QObject):
     """Coordinates threads and routes data to UI"""
-    # --- ALL REQUIRED SIGNALS ---
-    live_sample_ready = pyqtSignal(int)
+    # تم تغيير الإشارة لتستقبل قائمة العينات (Chunk)
+    live_chunk_ready = pyqtSignal(list)
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
-    brpm_updated = pyqtSignal(float)  # NEW: Breaths Per Minute
-    edr_graph_updated = pyqtSignal(list, list, list, list)  # NEW: (time, signal, breath_x, breath_y)
+    brpm_updated = pyqtSignal(float)
+    edr_graph_updated = pyqtSignal(list, list, list, list)
     peaks_detected = pyqtSignal(list, list)
-    apnea_warning_triggered = pyqtSignal(bool, str)  # FIXED: This was missing!
+    apnea_warning_triggered = pyqtSignal(bool, str)
     sensor_status_changed = pyqtSignal(bool, str)
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
@@ -167,12 +172,12 @@ class ECGService(QObject):
         self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
         self.peak_detector.start()
         
-        self.reader.new_sample_ready.connect(self.live_sample_ready.emit)
+        # ربط إشارة الـ Chunk الجديدة بدلاً من الإشارة الفردية
+        self.reader.new_chunk_ready.connect(self.live_chunk_ready.emit)
         self.reader.buffer_updated.connect(self.peak_detector.add_buffer)
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
-
     def start_monitoring(self):
         self.reader.start()
 

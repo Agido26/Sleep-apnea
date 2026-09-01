@@ -69,11 +69,12 @@ class ECGDashboard(QMainWindow):
         self.plot_data = deque([512] * 1000, maxlen=1000)
         self.current_peaks = [] 
 
-        self.ecg_service = ECGService(port="COM4", baudrate=115200, sample_rate=250)
-        self.ecg_service.live_sample_ready.connect(self.store_live_sample)
+        # ربط الدالة الجديدة الخاصة بالـ Chunk
+        self.ecg_service.live_chunk_ready.connect(self.store_live_chunk)
+        
         self.ecg_service.bpm_updated.connect(self.update_bpm)
         self.ecg_service.rr_updated.connect(self.update_rr)
-        self.ecg_service.brpm_updated.connect(self.update_resp)  # NEW
+        self.ecg_service.brpm_updated.connect(self.update_resp)
         self.ecg_service.peaks_detected.connect(self.update_peaks_graph)
         self.ecg_service.edr_graph_updated.connect(self.update_edr_graph) 
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
@@ -85,12 +86,16 @@ class ECGDashboard(QMainWindow):
 
         self.ecg_service.start_monitoring()
 
-    def store_live_sample(self, value: int):
-        self.plot_data.append(value)
+    def store_live_chunk(self, chunk: list):
+        """إضافة الحزمة دفعة واحدة وتزحيح مواقع الـ Peaks بمقدار طول الحزمة"""
+        chunk_len = len(chunk)
+        self.plot_data.extend(chunk)
+        
         for peak in self.current_peaks:
-            peak[0] -= 1
+            peak[0] -= chunk_len
+            
         self.current_peaks = [p for p in self.current_peaks if p[0] >= 0]
-
+        
     def draw_graph(self):
         self.ecg_line.setData(list(self.plot_data))
         if self.current_peaks:

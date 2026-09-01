@@ -7,8 +7,9 @@ import numpy as np
 from scipy.signal import find_peaks, butter, filtfilt
 
 class ECGSerialReader(QThread):
-    new_sample_ready = pyqtSignal(int)
-    buffer_updated = pyqtSignal(list, list)  # EMITS (raw_buffer, smoothed_buffer) - THIS WAS MISSING!
+    # تم تغيير الإشارة لتستقبل قائمة من العينات بدلاً من عينة واحدة
+    new_chunk_ready = pyqtSignal(list) 
+    buffer_updated = pyqtSignal(list, list)
     leads_off_detected = pyqtSignal(bool)
     connection_error = pyqtSignal(str)
 
@@ -21,19 +22,20 @@ class ECGSerialReader(QThread):
         self.is_running = False
         self.serial_conn = None
         
-        # 1. Keep buffer at 10 seconds (2500 samples) for accurate HRV math
         self.buffer_size = self.sample_rate * self.window_seconds 
         self.fifo_buffer = deque(maxlen=self.buffer_size)
         
-        # Trigger analysis every 1 SECOND (250 samples) for instant peak detection
         self.analysis_trigger = self.sample_rate * 1 
         self.samples_since_last_analysis = 0 
         
-        # EMA State for UI smoothing
         self.ema_value = 0.0
         self.ema_alpha = 0.3
         self.smoothed_buffer = deque(maxlen=self.buffer_size)
         self.is_leads_off = False
+        
+        # تجميع 10 عينات قبل إرسال الإشارة للواجهة
+        self.chunk_size = 10 
+        self.pending_chunk = []
 
     def _butter_bandpass_filter(self, data, lowcut=0.5, highcut=40.0, fs=250.0, order=3):
         nyquist = 0.5 * fs
@@ -43,11 +45,8 @@ class ECGSerialReader(QThread):
         return filtfilt(b, a, data)
 
     def _analyze_window(self):
-        """Executes in background thread every 1 second."""
         if len(self.fifo_buffer) < 50: 
-            return  # Not enough data
-        
-        # Emit the buffer to the Peak Detector Thread
+            return
         self.buffer_updated.emit(list(self.fifo_buffer), list(self.smoothed_buffer))
 
     def run(self):
@@ -68,7 +67,6 @@ class ECGSerialReader(QThread):
                 
                 value = int(raw_line)
                 
-                # Strict Leads-Off Handling
                 if value == -1 or value == 1023:
                     if not self.is_leads_off:
                         self.is_leads_off = True
@@ -76,14 +74,18 @@ class ECGSerialReader(QThread):
                         self.fifo_buffer.clear() 
                         self.smoothed_buffer.clear()
                         self.samples_since_last_analysis = 0
-                    self.new_sample_ready.emit(512)
+                        self.pending_chunk.clear()
+                    
+                    self.pending_chunk.append(512)
+                    if len(self.pending_chunk) >= self.chunk_size:
+                        self.new_chunk_ready.emit(list(self.pending_chunk))
+                        self.pending_chunk.clear()
                     continue 
                 else:
                     if self.is_leads_off:
                         self.is_leads_off = False
                         self.leads_off_detected.emit(False)
                 
-                # 1. EMA Smoothing for UI
                 if self.ema_value == 0.0:
                     self.ema_value = float(value)
                 else:
@@ -93,10 +95,12 @@ class ECGSerialReader(QThread):
                 self.smoothed_buffer.append(smoothed_int)
                 self.fifo_buffer.append(value)
                 
-                # Send to UI for immediate plotting
-                self.new_sample_ready.emit(smoothed_int)
+                # تجميع العينة المُنقاة في الـ Chunk
+                self.pending_chunk.append(smoothed_int)
+                if len(self.pending_chunk) >= self.chunk_size:
+                    self.new_chunk_ready.emit(list(self.pending_chunk))
+                    self.pending_chunk.clear()
                 
-                # 2. Trigger Analysis exactly every 1 second
                 self.samples_since_last_analysis += 1
                 if self.samples_since_last_analysis >= self.analysis_trigger:
                     self.samples_since_last_analysis = 0 
