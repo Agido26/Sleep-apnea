@@ -95,7 +95,7 @@ class ECGPeakDetector(QThread):
             
             # --- EDR: Interpolate, Filter, and Find Breath Peaks ---
             edr_t_ui, edr_signal_ui, breath_x, breath_y = [], [], [], []
-            brpm = 0.0 # NEW: Breaths Per Minute
+            brpm = 0.0
             
             if len(self.edr_times) > 10:
                 try:
@@ -110,9 +110,8 @@ class ECGPeakDetector(QThread):
                     # Find breath peaks (minimum distance ~1.5s = 6 samples at 4Hz)
                     breath_peaks, _ = find_peaks(edr_filtered, distance=6)
                     
-                    # --- NEW: Calculate Breaths Per Minute (BrPM) ---
+                    # --- Calculate Breaths Per Minute (BrPM) ---
                     if len(breath_peaks) > 1:
-                        # Time between breaths in seconds (since sampling rate is 4Hz, 1 sample = 0.25s)
                         breath_intervals_sec = np.diff(breath_peaks) * 0.25 
                         avg_interval = np.mean(breath_intervals_sec)
                         brpm = 60.0 / avg_interval
@@ -134,7 +133,7 @@ class ECGPeakDetector(QThread):
                             breath_y.append(edr_filtered[bp])
                             
                 except Exception:
-                    pass # Interpolation can fail on edge cases
+                    pass
 
             # Emit everything including the new brpm
             self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
@@ -150,12 +149,14 @@ class ECGPeakDetector(QThread):
 
 class ECGService(QObject):
     """Coordinates threads and routes data to UI"""
+    # --- ALL REQUIRED SIGNALS ---
     live_sample_ready = pyqtSignal(int)
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
-    brpm_updated = pyqtSignal(float) # NEW: Emits Breaths Per Minute
-    edr_graph_updated = pyqtSignal(list, list, list, list) 
+    brpm_updated = pyqtSignal(float)  # NEW: Breaths Per Minute
+    edr_graph_updated = pyqtSignal(list, list, list, list)  # NEW: (time, signal, breath_x, breath_y)
     peaks_detected = pyqtSignal(list, list)
+    apnea_warning_triggered = pyqtSignal(bool, str)  # FIXED: This was missing!
     sensor_status_changed = pyqtSignal(bool, str)
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
@@ -183,7 +184,7 @@ class ECGService(QObject):
                                  edr_t, edr_sig, breath_x, breath_y, brpm):
         self.bpm_updated.emit(bpm)
         self.rr_updated.emit(rr_intervals_ms)
-        self.brpm_updated.emit(brpm) # NEW: Send BrPM to UI
+        self.brpm_updated.emit(brpm)  # NEW
         self.peaks_detected.emit(x_peaks, y_peaks)
         
         # Emit EDR data to UI

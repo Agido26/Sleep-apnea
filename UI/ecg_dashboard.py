@@ -31,7 +31,7 @@ class ECGDashboard(QMainWindow):
         info_layout.addWidget(self.status_label)
         info_layout.addWidget(self.bpm_label)
         info_layout.addWidget(self.rr_label)
-        info_layout.addWidget(self.resp_label) # Added to layout
+        info_layout.addWidget(self.resp_label)
         info_layout.addWidget(self.alert_label)
         main_layout.addLayout(info_layout)
 
@@ -73,7 +73,7 @@ class ECGDashboard(QMainWindow):
         self.ecg_service.live_sample_ready.connect(self.store_live_sample)
         self.ecg_service.bpm_updated.connect(self.update_bpm)
         self.ecg_service.rr_updated.connect(self.update_rr)
-        self.ecg_service.brpm_updated.connect(self.update_resp) # NEW
+        self.ecg_service.brpm_updated.connect(self.update_resp)  # NEW
         self.ecg_service.peaks_detected.connect(self.update_peaks_graph)
         self.ecg_service.edr_graph_updated.connect(self.update_edr_graph) 
         self.ecg_service.apnea_warning_triggered.connect(self.update_apnea_status)
@@ -111,8 +111,8 @@ class ECGDashboard(QMainWindow):
             self.peak_scatter.setData([], [])   
             self.current_peaks = []
             self.bpm_label.setText("BPM: --")
-            self.rr_label.setText("RR: -- ms")
-            self.resp_label.setText("Resp: -- BrPM") # Reset Resp
+            self.rr_label.setText("RR: -- ms")  # FIXED: Reset RR label
+            self.resp_label.setText("Resp: -- BrPM")  # Reset Resp label
         else:
             self.status_label.setStyleSheet("font-size: 16px; color: green; font-weight: bold;")
 
@@ -125,8 +125,8 @@ class ECGDashboard(QMainWindow):
         if rr_intervals_ms:
             latest_rr = rr_intervals_ms[-1]
             self.rr_label.setText(f"RR: {latest_rr:.0f} ms")
+            self.rr_label.setStyleSheet("font-size: 24px; font-weight: bold; color: darkorange;")
 
-    # NEW: Update Respiratory Rate Label
     def update_resp(self, brpm: float):
         if brpm > 0:
             self.resp_label.setText(f"Resp: {brpm:.1f} BrPM")
@@ -153,3 +153,9 @@ class ECGDashboard(QMainWindow):
     def closeEvent(self, event):
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    dashboard = ECGDashboard()
+    dashboard.show()
+    sys.exit(app.exec())
