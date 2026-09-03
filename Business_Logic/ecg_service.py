@@ -2,7 +2,8 @@ import queue
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 import numpy as np
-from scipy.signal import find_peaks, butter, filtfilt
+# Added lfilter and lfilter_zi to your existing imports
+from scipy.signal import find_peaks, butter, filtfilt, lfilter, lfilter_zi
 from scipy.interpolate import interp1d
 
 class ECGPeakDetector(QThread):
@@ -110,21 +111,18 @@ class ECGPeakDetector(QThread):
                     signal_std = np.std(edr_filtered)
                     
                     # التعديل 3: إضافة prominence للبحث عن القمم الواضحة فقط وتجاهل الضوضاء أثناء كتم النفس
-                    # إذا كانت الإشارة مسطحة (كتم نفس)، لن يجد قمم.
                     breath_peaks, _ = find_peaks(edr_filtered, distance=6, prominence=signal_std * 0.6)
                     
                     # --- Calculate Breaths Per Minute (BrPM) ---
-                    # نتأكد أولاً أن الإشارة فيها تباين كافٍ (ليست حالة انقطاع نفس تام)
                     if len(breath_peaks) > 1 and signal_std > 0.5: 
                         breath_intervals_sec = np.diff(breath_peaks) * 0.25 
                         avg_interval = np.mean(breath_intervals_sec)
                         brpm = 60.0 / avg_interval
                         
-                        # Sanity check: إزالة القيود الضيقة
+                        # Sanity check
                         if not (3.0 < brpm < 40.0):
                             brpm = 0.0
                     else:
-                        # حالة كتم النفس (Apnea) - تباين الإشارة ضعيف جداً أو لا يوجد قمم
                         brpm = 0.0
 
                     # Map to UI (Show last 30 seconds of respiration)
@@ -139,8 +137,8 @@ class ECGPeakDetector(QThread):
                             breath_x.append(t_uniform[bp])
                             breath_y.append(edr_filtered[bp])            
                 except Exception as e:
-                    print(f"EDR Calculation Error: {e}") # لطباعة أي خطأ بدلاً من تجاهله
-                # Emit everything including the new brpm
+                    print(f"EDR Calculation Error: {e}") 
+                    
                 self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
                                        edr_t_ui, edr_signal_ui, breath_x, breath_y, brpm)
             else:
@@ -154,7 +152,6 @@ class ECGPeakDetector(QThread):
 
 class ECGService(QObject):
     """Coordinates threads and routes data to UI"""
-    # تم تغيير الإشارة لتستقبل قائمة العينات (Chunk)
     live_chunk_ready = pyqtSignal(list)
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
@@ -168,16 +165,26 @@ class ECGService(QObject):
         super().__init__()
         self.sample_rate = sample_rate
         
+        # --- NEW: Real-Time IIR Filter Setup for UI Graph Chunks ---
+        nyquist = 0.5 * self.sample_rate
+        self.live_b, self.live_a = butter(2, [0.5 / nyquist, 40.0 / nyquist], btype='band')
+        self.live_zi = lfilter_zi(self.live_b, self.live_a)
+        self.is_first_chunk = True
+        
+        # --- NEW: Rolling Average for Breathing Rate (BrPM) Stabilization ---
+        self.brpm_history = []
+        
         self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
         self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
         self.peak_detector.start()
         
-        # ربط إشارة الـ Chunk الجديدة بدلاً من الإشارة الفردية
-        self.reader.new_chunk_ready.connect(self.live_chunk_ready.emit)
+        # Intercept the chunk to apply lfilter before sending to UI
+        self.reader.new_chunk_ready.connect(self._process_live_chunk)
         self.reader.buffer_updated.connect(self.peak_detector.add_buffer)
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
+
     def start_monitoring(self):
         self.reader.start()
 
@@ -185,13 +192,39 @@ class ECGService(QObject):
         self.reader.stop()
         self.peak_detector.stop()
 
+    def _process_live_chunk(self, raw_chunk: list):
+        """Applies the real-time continuous IIR filter to incoming chunks."""
+        if not raw_chunk:
+            return
+            
+        if self.is_first_chunk:
+            # Initialize filter memory state on the very first sample
+            self.live_zi = self.live_zi * raw_chunk[0]
+            self.is_first_chunk = False
+            
+        # lfilter efficiently processes the entire chunk array at once
+        filtered_chunk, self.live_zi = lfilter(self.live_b, self.live_a, raw_chunk, zi=self.live_zi)
+        
+        # Bandpass centers the wave at 0. Re-add 512 to center it on the UI (range 0-1023)
+        clean_chunk = [int(val + 512) for val in filtered_chunk]
+        self.live_chunk_ready.emit(clean_chunk)
+
     def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
                                  edr_t, edr_sig, breath_x, breath_y, brpm):
         self.bpm_updated.emit(bpm)
         self.rr_updated.emit(rr_intervals_ms)
-        self.brpm_updated.emit(brpm)  # NEW
         self.peaks_detected.emit(x_peaks, y_peaks)
         
+        # --- NEW: Stabilize Respiration Rate (BrPM) using Rolling Average ---
+        if brpm > 0:
+            self.brpm_history.append(brpm)
+            if len(self.brpm_history) > 6:  # Average the last 6 valid updates
+                self.brpm_history.pop(0)
+            smoothed_brpm = sum(self.brpm_history) / len(self.brpm_history)
+            self.brpm_updated.emit(smoothed_brpm)
+        else:
+            self.brpm_updated.emit(0.0)
+            
         # Emit EDR data to UI
         if edr_t:
             self.edr_graph_updated.emit(edr_t, edr_sig, breath_x, breath_y)
@@ -202,6 +235,8 @@ class ECGService(QObject):
             self.peak_detector.last_peak_absolute_time = 0
             self.peak_detector.edr_times = []
             self.peak_detector.edr_amps = []
+            self.is_first_chunk = True # Reset filter state on reconnect
+            self.brpm_history.clear()
         else:
             self.sensor_status_changed.emit(True, "Sensor Connected Normally")
 
