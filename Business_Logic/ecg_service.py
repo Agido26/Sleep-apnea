@@ -8,7 +8,6 @@ from scipy.interpolate import interp1d
 
 class ECGPeakDetector(QThread):
     """الخيط الثاني: اكتشاف القمم، حساب RR، واستخراج إشارة التنفس (EDR)"""
-    # يرسل: (bpm, x_peaks_ui, y_peaks_ui, rr_intervals_ms, edr_time, edr_signal, breath_x, breath_y, brpm)
     analysis_results = pyqtSignal(int, list, list, list, list, list, list, list, float)
 
     def __init__(self, sample_rate=250):
@@ -64,12 +63,12 @@ class ECGPeakDetector(QThread):
                 self.edr_times = [v[0] for v in valid_data]
                 self.edr_amps = [v[1] for v in valid_data]
 
-            # --- حساب فترات RR وتنظيفها من الضوضاء (الخطوة الأهم للـ HRV) ---
+            # --- حساب فترات RR وتنظيفها ---
             rr_intervals_ms = []
             if self.last_peak_absolute_time > 0:
                 rr_time_sec = (absolute_peaks[0] - self.last_peak_absolute_time) / self.sample_rate
                 rr_ms = rr_time_sec * 1000.0
-                if 300 < rr_ms < 2000: # تجاهل القيم غير الفسيولوجية (ضوضاء)
+                if 300 < rr_ms < 2000:
                     rr_intervals_ms.append(rr_ms)
             
             for i in range(1, len(absolute_peaks)):
@@ -136,12 +135,12 @@ class ECGService(QObject):
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
     brpm_updated = pyqtSignal(float)
-    hrv_updated = pyqtSignal(float) # لإرضاء واجهة المستخدم
+    hrv_updated = pyqtSignal(float)
     edr_graph_updated = pyqtSignal(list, list, list, list)
     peaks_detected = pyqtSignal(list, list)
     apnea_warning_triggered = pyqtSignal(bool, str)
     sensor_status_changed = pyqtSignal(bool, str)
-    apnea_index_updated = pyqtSignal(float) # للمراقبة أو الرسم المستقبلي
+    apnea_index_updated = pyqtSignal(float)
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
         super().__init__()
@@ -154,19 +153,24 @@ class ECGService(QObject):
         self.is_first_chunk = True
         self.brpm_history = []
 
-        # --- حالة حساب HRV ومؤشر انقطاع التنفس (Apnea Index) ---
-        self.rr_history = deque(maxlen=150) # يحتفظ بآخر ~60 ثانية من فترات RR (بافتراض ~2.5 نبضة/ثانية)
-        self.baseline_rmssd = deque(maxlen=60) # خط الأساس لـ RMSSD (آخر 10-15 دقيقة)
-        self.baseline_sdrr = deque(maxlen=60)  # خط الأساس لـ SDRR
-        self.ai_history = deque(maxlen=60)     # سجل مؤشر انقطاع التنفس
-        self.consecutive_apnea_windows = 0     # عداد الحالات المتتالية (لمنع الإنذار الكاذب)
+        # 🔴 التعديل الأهم: متغيرات لتجميع العينات الفردية في حزم (Chunks)
+        self._live_buffer = []
+        self._chunk_size = 10
+
+        # --- حالة حساب HRV ومؤشر انقطاع التنفس ---
+        self.rr_history = deque(maxlen=150)
+        self.baseline_rmssd = deque(maxlen=60)
+        self.baseline_sdrr = deque(maxlen=60)
+        self.ai_history = deque(maxlen=60)
+        self.consecutive_apnea_windows = 0
         self.apnea_event_count = 0
 
         self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
         self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
         self.peak_detector.start()
 
-        self.reader.new_chunk_ready.connect(self._process_live_chunk)
+        # 🔴 الربط بـ new_sample_ready (عينة واحدة) بدلاً من new_chunk_ready
+        self.reader.new_sample_ready.connect(self._process_live_sample)
         self.reader.buffer_updated.connect(self.peak_detector.add_buffer)
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
@@ -179,14 +183,24 @@ class ECGService(QObject):
         self.reader.stop()
         self.peak_detector.stop()
 
-    def _process_live_chunk(self, raw_chunk: list):
-        if not raw_chunk: return
-        if self.is_first_chunk:
-            self.live_zi = self.live_zi * raw_chunk[0]
-            self.is_first_chunk = False
-        filtered_chunk, self.live_zi = lfilter(self.live_b, self.live_a, raw_chunk, zi=self.live_zi)
-        clean_chunk = [int(val + 512) for val in filtered_chunk]
-        self.live_chunk_ready.emit(clean_chunk)
+    # 🔴 دالة جديدة لتجميع العينات الفردية في حزم (Chunks)
+    def _process_live_sample(self, value: int):
+        """تجمع العينات الفردية القادمة من الـ Serial Reader في حزم بحجم 10 لتطبيق الفلتر."""
+        self._live_buffer.append(value)
+        
+        # عندما تكتمل الحزمة (10 عينات = 40 مللي ثانية)
+        if len(self._live_buffer) >= self._chunk_size:
+            if self.is_first_chunk:
+                self.live_zi = self.live_zi * self._live_buffer[0]
+                self.is_first_chunk = False
+                
+            # تطبيق الفلتر على الحزمة كاملة
+            filtered_chunk, self.live_zi = lfilter(self.live_b, self.live_a, self._live_buffer, zi=self.live_zi)
+            clean_chunk = [int(val + 512) for val in filtered_chunk]
+            
+            # إرسال الحزمة للواجهة (الواجهة ستستقبلها عبر store_live_chunk)
+            self.live_chunk_ready.emit(clean_chunk)
+            self._live_buffer = [] # تفريغ الحزمة لتجميع العينات التالية
 
     def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
                                  edr_t, edr_sig, breath_x, breath_y, brpm):
@@ -211,7 +225,6 @@ class ECGService(QObject):
             for rr in rr_intervals_ms:
                 self.rr_history.append(rr)
             
-            # نحتاج على الأقل 30 فترة RR لحساب إحصاءات ذات معنى (حوالي 20-30 ثانية)
             if len(self.rr_history) >= 30:
                 self._evaluate_apnea_index()
 
@@ -225,7 +238,6 @@ class ECGService(QObject):
         return float(np.std(rr_list))
 
     def _calculate_mad(self, data):
-        """حساب الانحراف الوسيطي المطلق (MAD) لأنه مقاوم للقيم الشاذة (Outliers)"""
         if not data: return 1.0
         median = np.median(data)
         mad = float(np.median(np.abs(data - median)))
@@ -236,17 +248,14 @@ class ECGService(QObject):
         rmssd_t = self._calculate_rmssd(current_rr)
         sdrr_t = self._calculate_sdrr(current_rr)
         
-        # إرسال قيمة HRV للواجهة (نستخدم RMSSD لأنه الأدق لهذه المهمة)
         self.hrv_updated.emit(rmssd_t)
 
         if rmssd_t == 0 or sdrr_t == 0:
             return
 
-        # تحديث خط الأساس (Baseline)
         self.baseline_rmssd.append(rmssd_t)
         self.baseline_sdrr.append(sdrr_t)
         
-        # نحتاج 10 نقاط على الأقل لبناء خط أساس موثوق (حوالي 10-15 دقيقة)
         if len(self.baseline_rmssd) < 10:
             return
 
@@ -255,33 +264,27 @@ class ECGService(QObject):
         med_sdrr = np.median(self.baseline_sdrr)
         mad_sdrr = self._calculate_mad(self.baseline_sdrr)
 
-        # حساب Z-Score باستخدام MAD (أكثر ثباتاً من الانحراف المعياري العادي)
         z_rmssd = (rmssd_t - med_rmssd) / (1.4826 * mad_rmssd)
         z_sdrr = (sdrr_t - med_sdrr) / (1.4826 * mad_sdrr)
 
-        # --- معادلة مؤشر انقطاع التنفس (Apnea Index) ---
-        # الشرط: يجب أن ينخفض RMSSD (توقف التنفس) AND يرتفع SDRR (استجابة الجسم المفاجئة)
-        # إذا كانت الحركة هي السبب، فغالباً سيرتفع الاثنان معاً، وبالتالي الجزء الأول سيكون 0 ولن ينطلق الإنذار.
         ai = max(0.0, -z_rmssd) * (1.0 + max(0.0, z_sdrr))
         
         self.ai_history.append(ai)
         self.apnea_index_updated.emit(ai)
 
-        # --- آلية التكيف ومنع الإنذار الكاذب (State Machine) ---
         if len(self.ai_history) > 15:
             threshold = np.mean(self.ai_history) + 2.5 * np.std(self.ai_history)
-            threshold = max(threshold, 2.5) # حد أدنى مطلق لمنع الحساسية الزائدة
+            threshold = max(threshold, 2.5)
             
             if ai > threshold:
                 self.consecutive_apnea_windows += 1
             else:
                 self.consecutive_apnea_windows = 0
 
-            # يجب أن يستمر النمط غير الطبيعي لمدة 3 تقييمات متتالية (حوالي 3 ثوانٍ) لتأكيد الحدث
             if self.consecutive_apnea_windows >= 3:
                 self.apnea_event_count += 1
                 self.apnea_warning_triggered.emit(True, f"⚠️ انقطاع تنفس محتمل (HRV Pattern) #{self.apnea_event_count}")
-                self.consecutive_apnea_windows = 0 # إعادة التعيين لمنع تكرار الإنذار لنفس الحدث
+                self.consecutive_apnea_windows = 0
             else:
                 self.apnea_warning_triggered.emit(False, "نمط HRV طبيعي")
 
@@ -292,8 +295,8 @@ class ECGService(QObject):
             self.peak_detector.edr_times = []
             self.peak_detector.edr_amps = []
             self.is_first_chunk = True
+            self._live_buffer = [] # 🔴 تفريغ الحزمة المؤقتة عند فصل المستشعر
             self.brpm_history.clear()
-            # إعادة تعيين سجلات HRV عند فصل المستشعر لمنع بيانات فاسدة
             self.rr_history.clear()
             self.baseline_rmssd.clear()
             self.baseline_sdrr.clear()
