@@ -94,23 +94,64 @@ class ECGPeakDetector(QThread):
 
             if len(self.edr_times) > 10:
                 try:
+                    # 1. Interpolate to uniform 4Hz
                     f = interp1d(self.edr_times, self.edr_amps, kind='cubic', fill_value="extrapolate")
                     t_uniform = np.arange(self.edr_times[0], self.edr_times[-1], 0.25) 
                     edr_signal = f(t_uniform)
+                    
+                    # 2. Bandpass Filter (0.05Hz to 0.6Hz)
                     edr_filtered = self._butter_bandpass_filter(edr_signal, 0.05, 0.6, 4.0)
-                    signal_std = np.std(edr_filtered)
-                    breath_peaks, _ = find_peaks(edr_filtered, distance=6, prominence=signal_std * 0.6)
                     
-                    if len(breath_peaks) > 1 and signal_std > 0.5: 
-                        breath_intervals_sec = np.diff(breath_peaks) * 0.25 
-                        avg_interval = np.mean(breath_intervals_sec)
-                        brpm = 60.0 / avg_interval
-                        if not (3.0 < brpm < 40.0): brpm = 0.0
+                    # ==========================================================
+                    # التعديل الجذري: اكتشاف التنفس الحقيقي وتجاهل الضوضاء
+                    # ==========================================================
                     
+                    # أ. حساب "النطاق الحقيقي" للإشارة (Robust Range) باستخدام المئينات
+                    # هذا يتجاهل القمم الشاذة (Outliers) ويقيس فقط سعة موجة التنفس الفعلية
+                    p95 = np.percentile(edr_filtered, 95)
+                    p5 = np.percentile(edr_filtered, 5)
+                    signal_range = p95 - p5 
+                    
+                    # ب. حساب أقصى سعة مطلقة للإشارة (لجعل العتبات مستقلة عن قوة جهازك)
+                    max_abs_amp = np.max(np.abs(edr_filtered))
+                    
+                    # ج. شرط "الخط المسطح" (Flatline / Apnea Check)
+                    # إذا كان التذبذب الحقيقي (signal_range) أقل من 15% من أقصى سعة، 
+                    # فهذا يعني أن الموجة مسطحة (أنت تحبس نفسك أو لا يوجد تنفس كافٍ)
+                    if max_abs_amp > 0 and signal_range < (max_abs_amp * 0.15):
+                        brpm = 0.0
+                        breath_peaks = []
+                    else:
+                        # د. حساب عتبة البروز (Prominence) ديناميكياً
+                        # يجب أن تكون القمة بارزة بمقدار 25% على الأقل من سعة الموجة الكلية 
+                        # لكي تُحسب "نفساً". هذا يتجاهل تماماً التموجات الصغيرة للضوضاء.
+                        min_prominence = signal_range * 0.25
+                        
+                        # هـ. اكتشاف القمز مع زيادة المسافة الدنيا 
+                        # distance=8 عند تردد 4Hz تعني 2 ثانية (أي الحد الأقصى 30 نفس/دقيقة)
+                        # هذا يمنع فيزيائياً احتساب الضوضاء السريعة كتنفس.
+                        breath_peaks, _ = find_peaks(edr_filtered, distance=8, prominence=min_prominence)
+                        
+                        if len(breath_peaks) > 1:
+                            breath_intervals_sec = np.diff(breath_peaks) * 0.25 
+                            avg_interval = np.mean(breath_intervals_sec)
+                            brpm = 60.0 / avg_interval
+                            
+                            # Sanity check: تضييق النطاق المقبول قليلاً
+                            if not (3.0 < brpm < 35.0): 
+                                brpm = 0.0
+                        else:
+                            brpm = 0.0
+                            
+                    # ==========================================================
+                    
+                    # Map to UI (Show last 30 seconds of respiration)
                     ui_cutoff = t_uniform[-1] - 30.0
                     ui_mask = t_uniform >= ui_cutoff
                     edr_t_ui = t_uniform[ui_mask].tolist()
                     edr_signal_ui = edr_filtered[ui_mask].tolist()
+                    
+                    breath_x, breath_y = [], []
                     for bp in breath_peaks:
                         if t_uniform[bp] >= ui_cutoff:
                             breath_x.append(t_uniform[bp])
