@@ -1,28 +1,30 @@
 import queue
+import numpy as np
+from collections import deque
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
-import numpy as np
-# ── ADDED: lfilter and lfilter_zi for real-time IIR filtering ──
 from scipy.signal import find_peaks, butter, filtfilt, lfilter, lfilter_zi
-
+from scipy.interpolate import interp1d
 
 class ECGPeakDetector(QThread):
-    """Thread 2: Finds peaks and calculates instantaneous RR intervals."""
-    # Emits: (bpm, hrv_sdnn, x_peaks_ui, y_peaks_ui, rr_intervals_ms, absolute_peak_times)
-    analysis_results = pyqtSignal(int, float, list, list, list, list)
+    """الخيط الثاني: اكتشاف القمم، حساب RR، واستخراج إشارة التنفس (EDR)"""
+    # يرسل: (bpm, x_peaks_ui, y_peaks_ui, rr_intervals_ms, edr_time, edr_signal, breath_x, breath_y, brpm)
+    analysis_results = pyqtSignal(int, list, list, list, list, list, list, list, float)
 
     def __init__(self, sample_rate=250):
         super().__init__()
         self.sample_rate = sample_rate
         self.data_queue = queue.Queue()
         self.is_running = True
-        self.absolute_sample_count = 0
-        self.peak_timestamps = []
+        self.absolute_sample_count = 0 
+        self.last_peak_absolute_time = 0 
+        self.edr_times = []
+        self.edr_amps = []
 
     def add_buffer(self, raw_buffer, smoothed_buffer):
         self.data_queue.put((raw_buffer, smoothed_buffer))
 
-    def _butter_bandpass_filter(self, data, lowcut=0.5, highcut=40.0, fs=250.0, order=3):
+    def _butter_bandpass_filter(self, data, lowcut, highcut, fs, order=3):
         nyquist = 0.5 * fs
         low = lowcut / nyquist
         high = highcut / nyquist
@@ -41,42 +43,87 @@ class ECGPeakDetector(QThread):
         raw_data = np.array(raw_buffer)
         smoothed_data = np.array(smoothed_buffer)
 
-        filtered_data = self._butter_bandpass_filter(raw_data)
+        # 1. تصفية الإشارة واكتشاف القمم
+        filtered_data = self._butter_bandpass_filter(raw_data, 0.5, 40.0, self.sample_rate)
         threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
         min_distance = int(self.sample_rate * 0.4)
         peaks, _ = find_peaks(filtered_data, height=threshold, distance=min_distance)
 
-        if len(peaks) > 1:
-            absolute_peaks = [p + self.absolute_sample_count for p in peaks]
-            self.absolute_sample_count += len(raw_data)
-            self.peak_timestamps.extend(absolute_peaks)
+        if len(peaks) > 0:
+            absolute_peaks = [int(p) + self.absolute_sample_count for p in peaks]
+            
+            # --- استخراج سعة القمم لحساب التنفس (EDR) ---
+            new_amps = [float(filtered_data[p]) for p in peaks]
+            new_times = [float(p) / self.sample_rate for p in absolute_peaks]
+            self.edr_amps.extend(new_amps)
+            self.edr_times.extend(new_times)
 
-            cutoff = self.absolute_sample_count - (60 * self.sample_rate)
-            self.peak_timestamps = [t for t in self.peak_timestamps if t > cutoff]
+            if self.edr_times:
+                cutoff = self.edr_times[-1] - 60.0
+                valid_data = [(t, a) for t, a in zip(self.edr_times, self.edr_amps) if t > cutoff]
+                self.edr_times = [v[0] for v in valid_data]
+                self.edr_amps = [v[1] for v in valid_data]
 
+            # --- حساب فترات RR وتنظيفها من الضوضاء (الخطوة الأهم للـ HRV) ---
             rr_intervals_ms = []
-            for i in range(1, len(self.peak_timestamps)):
-                rr_time_sec = (self.peak_timestamps[i] - self.peak_timestamps[i-1]) / self.sample_rate
-                rr_intervals_ms.append(rr_time_sec * 1000.0)
+            if self.last_peak_absolute_time > 0:
+                rr_time_sec = (absolute_peaks[0] - self.last_peak_absolute_time) / self.sample_rate
+                rr_ms = rr_time_sec * 1000.0
+                if 300 < rr_ms < 2000: # تجاهل القيم غير الفسيولوجية (ضوضاء)
+                    rr_intervals_ms.append(rr_ms)
+            
+            for i in range(1, len(absolute_peaks)):
+                rr_time_sec = (absolute_peaks[i] - absolute_peaks[i-1]) / self.sample_rate
+                rr_ms = rr_time_sec * 1000.0
+                if 300 < rr_ms < 2000:
+                    rr_intervals_ms.append(rr_ms)
+                    
+            self.last_peak_absolute_time = absolute_peaks[-1]
+            self.absolute_sample_count += len(raw_data)
 
-            if len(rr_intervals_ms) > 0:
-                mean_rr = np.mean(rr_intervals_ms) / 1000.0
-                real_bpm = int(60 / mean_rr)
-                hrv_sdnn = float(np.std(rr_intervals_ms))
-            else:
-                real_bpm = 0
-                hrv_sdnn = 0.0
+            latest_rr_sec = rr_intervals_ms[-1] / 1000.0 if rr_intervals_ms else 1.0
+            real_bpm = int(60 / latest_rr_sec) if rr_intervals_ms else 0
 
-            ui_window_size = 1000
-            offset = len(raw_data) - ui_window_size
+            # تعيين القمم للرسم على الواجهة
+            ui_window_size = 1000  
+            offset = len(raw_data) - ui_window_size  
             x_indices = [int(p - offset) for p in peaks if p >= offset]
             y_values = [int(smoothed_data[p]) for p in peaks if p >= offset]
 
-            self.analysis_results.emit(real_bpm, hrv_sdnn, x_indices, y_values,
-                                       rr_intervals_ms, self.peak_timestamps)
+            edr_t_ui, edr_signal_ui, breath_x, breath_y = [], [], [], []
+            brpm = 0.0
+
+            if len(self.edr_times) > 10:
+                try:
+                    f = interp1d(self.edr_times, self.edr_amps, kind='cubic', fill_value="extrapolate")
+                    t_uniform = np.arange(self.edr_times[0], self.edr_times[-1], 0.25) 
+                    edr_signal = f(t_uniform)
+                    edr_filtered = self._butter_bandpass_filter(edr_signal, 0.05, 0.6, 4.0)
+                    signal_std = np.std(edr_filtered)
+                    breath_peaks, _ = find_peaks(edr_filtered, distance=6, prominence=signal_std * 0.6)
+                    
+                    if len(breath_peaks) > 1 and signal_std > 0.5: 
+                        breath_intervals_sec = np.diff(breath_peaks) * 0.25 
+                        avg_interval = np.mean(breath_intervals_sec)
+                        brpm = 60.0 / avg_interval
+                        if not (3.0 < brpm < 40.0): brpm = 0.0
+                    
+                    ui_cutoff = t_uniform[-1] - 30.0
+                    ui_mask = t_uniform >= ui_cutoff
+                    edr_t_ui = t_uniform[ui_mask].tolist()
+                    edr_signal_ui = edr_filtered[ui_mask].tolist()
+                    for bp in breath_peaks:
+                        if t_uniform[bp] >= ui_cutoff:
+                            breath_x.append(t_uniform[bp])
+                            breath_y.append(edr_filtered[bp])            
+                except Exception as e:
+                    print(f"EDR Calculation Error: {e}") 
+            
+            self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
+                                       edr_t_ui, edr_signal_ui, breath_x, breath_y, brpm)
         else:
             self.absolute_sample_count += len(raw_data)
-            self.analysis_results.emit(0, 0.0, [], [], [], self.peak_timestamps)
+            self.analysis_results.emit(0, [], [], [], [], [], [], [], 0.0)
 
     def stop(self):
         self.is_running = False
@@ -84,83 +131,46 @@ class ECGPeakDetector(QThread):
 
 
 class ECGService(QObject):
-    """Coordinates threads and runs the 60-second Apnea Detection Logic (Pathway A)"""
-    live_sample_ready = pyqtSignal(int)       # ← SAME signal name, UI unchanged
+    """منسق الخيوط وحساب مؤشر انقطاع التنفس المتقدم (HRV-based Apnea Index)"""
+    live_chunk_ready = pyqtSignal(list)
     bpm_updated = pyqtSignal(int)
-    hrv_updated = pyqtSignal(float)
+    rr_updated = pyqtSignal(list)
+    brpm_updated = pyqtSignal(float)
+    hrv_updated = pyqtSignal(float) # لإرضاء واجهة المستخدم
+    edr_graph_updated = pyqtSignal(list, list, list, list)
     peaks_detected = pyqtSignal(list, list)
     apnea_warning_triggered = pyqtSignal(bool, str)
     sensor_status_changed = pyqtSignal(bool, str)
+    apnea_index_updated = pyqtSignal(float) # للمراقبة أو الرسم المستقبلي
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
         super().__init__()
         self.sample_rate = sample_rate
 
-        # ──────────────────────────────────────────────────────────────
-        # NEW: Real-Time IIR Butterworth Filter for live UI signal
-        # This is the core improvement from the newest code.
-        # lfilter is a causal IIR filter — zero latency, sample-by-sample,
-        # with continuous state memory (zi) so there are NO edge artifacts.
-        # ──────────────────────────────────────────────────────────────
+        # --- إعدادات الفلتر الحي للواجهة ---
         nyquist = 0.5 * self.sample_rate
         self.live_b, self.live_a = butter(2, [0.5 / nyquist, 40.0 / nyquist], btype='band')
         self.live_zi = lfilter_zi(self.live_b, self.live_a)
-        self.is_first_sample = True
+        self.is_first_chunk = True
+        self.brpm_history = []
 
-        # Apnea Detection State (Pathway A)
-        self.bpm_history = []
+        # --- حالة حساب HRV ومؤشر انقطاع التنفس (Apnea Index) ---
+        self.rr_history = deque(maxlen=150) # يحتفظ بآخر ~60 ثانية من فترات RR (بافتراض ~2.5 نبضة/ثانية)
+        self.baseline_rmssd = deque(maxlen=60) # خط الأساس لـ RMSSD (آخر 10-15 دقيقة)
+        self.baseline_sdrr = deque(maxlen=60)  # خط الأساس لـ SDRR
+        self.ai_history = deque(maxlen=60)     # سجل مؤشر انقطاع التنفس
+        self.consecutive_apnea_windows = 0     # عداد الحالات المتتالية (لمنع الإنذار الكاذب)
         self.apnea_event_count = 0
 
-        # Thread 1: Serial Reading
         self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
-        # Thread 2: Peak Detection
         self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
         self.peak_detector.start()
 
-        # ──────────────────────────────────────────────────────────────
-        # CHANGED: Instead of directly forwarding raw samples to UI,
-        # intercept them through the IIR filter first.
-        #
-        # OLD: self.reader.new_sample_ready.connect(self.live_sample_ready.emit)
-        # NEW:
-        # ──────────────────────────────────────────────────────────────
-        self.reader.new_sample_ready.connect(self._process_live_sample)
-
+        self.reader.new_chunk_ready.connect(self._process_live_chunk)
         self.reader.buffer_updated.connect(self.peak_detector.add_buffer)
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
-
-    # ──────────────────────────────────────────────────────────────────
-    # NEW METHOD: The only addition to the service layer
-    # ──────────────────────────────────────────────────────────────────
-    def _process_live_sample(self, raw_value: int):
-        """Applies continuous IIR bandpass filter to each incoming sample.
-        
-        Why this makes the signal smoother:
-        - The old code sent raw EMA-smoothed ADC values (still had baseline
-          wander, powerline noise, and muscle artifacts).
-        - This IIR Butterworth bandpass (0.5–40 Hz) removes all of that
-          in real-time with ZERO latency because lfilter is causal.
-        - The zi state variable carries filter memory between samples,
-          so there are no startup transients or edge artifacts.
-        """
-        if self.is_first_sample:
-            # Initialize filter state to the first sample value
-            # to avoid a huge transient spike at startup
-            self.live_zi = self.live_zi * raw_value
-            self.is_first_sample = False
-
-        # lfilter processes even a single sample efficiently
-        # (just a few multiply-accumulate operations)
-        filtered, self.live_zi = lfilter(
-            self.live_b, self.live_a, [raw_value], zi=self.live_zi
-        )
-
-        # Bandpass filter centers the waveform at 0.
-        # Re-add 512 to place it back in the UI's expected 0–1023 range.
-        clean_value = int(filtered[0] + 512)
-        self.live_sample_ready.emit(clean_value)
 
     def start_monitoring(self):
         self.reader.start()
@@ -169,51 +179,126 @@ class ECGService(QObject):
         self.reader.stop()
         self.peak_detector.stop()
 
-    def _handle_analysis_results(self, bpm, hrv, x_peaks, y_peaks,
-                                  rr_intervals_ms, peak_timestamps):
-        """Receives data from Peak Detector and runs the 60s Apnea Logic."""
+    def _process_live_chunk(self, raw_chunk: list):
+        if not raw_chunk: return
+        if self.is_first_chunk:
+            self.live_zi = self.live_zi * raw_chunk[0]
+            self.is_first_chunk = False
+        filtered_chunk, self.live_zi = lfilter(self.live_b, self.live_a, raw_chunk, zi=self.live_zi)
+        clean_chunk = [int(val + 512) for val in filtered_chunk]
+        self.live_chunk_ready.emit(clean_chunk)
+
+    def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
+                                 edr_t, edr_sig, breath_x, breath_y, brpm):
+        # 1. تحديث الواجهة بالبيانات الأساسية
         self.bpm_updated.emit(bpm)
-        self.hrv_updated.emit(hrv)
+        self.rr_updated.emit(rr_intervals_ms)
         self.peaks_detected.emit(x_peaks, y_peaks)
 
-        if bpm > 0 and len(rr_intervals_ms) > 0:
-            self._detect_apnea_v_shape(bpm, rr_intervals_ms)
+        if brpm > 0:
+            self.brpm_history.append(brpm)
+            if len(self.brpm_history) > 6:
+                self.brpm_history.pop(0)
+            self.brpm_updated.emit(sum(self.brpm_history) / len(self.brpm_history))
+        else:
+            self.brpm_updated.emit(0.0)
 
-    def _detect_apnea_v_shape(self, current_bpm, rr_intervals_ms):
-        """
-        Proposal Phase 3, Pathway A:
-        Scans the 60-second window for Bradycardia (drop) followed by Tachycardia (spike).
-        """
-        self.bpm_history.append(current_bpm)
-        if len(self.bpm_history) > 60:
-            self.bpm_history.pop(0)
+        if edr_t:
+            self.edr_graph_updated.emit(edr_t, edr_sig, breath_x, breath_y)
 
-        if len(self.bpm_history) < 30:
+        # 2. المنطق المتقدم: حساب HRV ومؤشر انقطاع التنفس
+        if rr_intervals_ms:
+            for rr in rr_intervals_ms:
+                self.rr_history.append(rr)
+            
+            # نحتاج على الأقل 30 فترة RR لحساب إحصاءات ذات معنى (حوالي 20-30 ثانية)
+            if len(self.rr_history) >= 30:
+                self._evaluate_apnea_index()
+
+    def _calculate_rmssd(self, rr_list):
+        if len(rr_list) < 2: return 0.0
+        diff_rr = np.diff(rr_list)
+        return float(np.sqrt(np.mean(diff_rr**2)))
+
+    def _calculate_sdrr(self, rr_list):
+        if len(rr_list) < 2: return 0.0
+        return float(np.std(rr_list))
+
+    def _calculate_mad(self, data):
+        """حساب الانحراف الوسيطي المطلق (MAD) لأنه مقاوم للقيم الشاذة (Outliers)"""
+        if not data: return 1.0
+        median = np.median(data)
+        mad = float(np.median(np.abs(data - median)))
+        return mad if mad > 0 else 1.0
+
+    def _evaluate_apnea_index(self):
+        current_rr = list(self.rr_history)
+        rmssd_t = self._calculate_rmssd(current_rr)
+        sdrr_t = self._calculate_sdrr(current_rr)
+        
+        # إرسال قيمة HRV للواجهة (نستخدم RMSSD لأنه الأدق لهذه المهمة)
+        self.hrv_updated.emit(rmssd_t)
+
+        if rmssd_t == 0 or sdrr_t == 0:
             return
 
-        baseline_bpm = np.mean(self.bpm_history)
-        bradycardia_threshold = baseline_bpm - 10
-        tachycardia_threshold = baseline_bpm + 10
+        # تحديث خط الأساس (Baseline)
+        self.baseline_rmssd.append(rmssd_t)
+        self.baseline_sdrr.append(sdrr_t)
+        
+        # نحتاج 10 نقاط على الأقل لبناء خط أساس موثوق (حوالي 10-15 دقيقة)
+        if len(self.baseline_rmssd) < 10:
+            return
 
-        recent_history = self.bpm_history[-30:]
-        has_brady = any(bpm < bradycardia_threshold for bpm in recent_history)
-        has_tachy = any(bpm > tachycardia_threshold for bpm in recent_history)
+        med_rmssd = np.median(self.baseline_rmssd)
+        mad_rmssd = self._calculate_mad(self.baseline_rmssd)
+        med_sdrr = np.median(self.baseline_sdrr)
+        mad_sdrr = self._calculate_mad(self.baseline_sdrr)
 
-        if has_brady and has_tachy:
-            self.apnea_event_count += 1
-            self.apnea_warning_triggered.emit(
-                True, f"⚠️ APNEA EVENT DETECTED! (Total: {self.apnea_event_count})"
-            )
-            self.bpm_history = []
-        else:
-            self.apnea_warning_triggered.emit(False, "Normal Breathing Pattern")
+        # حساب Z-Score باستخدام MAD (أكثر ثباتاً من الانحراف المعياري العادي)
+        z_rmssd = (rmssd_t - med_rmssd) / (1.4826 * mad_rmssd)
+        z_sdrr = (sdrr_t - med_sdrr) / (1.4826 * mad_sdrr)
+
+        # --- معادلة مؤشر انقطاع التنفس (Apnea Index) ---
+        # الشرط: يجب أن ينخفض RMSSD (توقف التنفس) AND يرتفع SDRR (استجابة الجسم المفاجئة)
+        # إذا كانت الحركة هي السبب، فغالباً سيرتفع الاثنان معاً، وبالتالي الجزء الأول سيكون 0 ولن ينطلق الإنذار.
+        ai = max(0.0, -z_rmssd) * (1.0 + max(0.0, z_sdrr))
+        
+        self.ai_history.append(ai)
+        self.apnea_index_updated.emit(ai)
+
+        # --- آلية التكيف ومنع الإنذار الكاذب (State Machine) ---
+        if len(self.ai_history) > 15:
+            threshold = np.mean(self.ai_history) + 2.5 * np.std(self.ai_history)
+            threshold = max(threshold, 2.5) # حد أدنى مطلق لمنع الحساسية الزائدة
+            
+            if ai > threshold:
+                self.consecutive_apnea_windows += 1
+            else:
+                self.consecutive_apnea_windows = 0
+
+            # يجب أن يستمر النمط غير الطبيعي لمدة 3 تقييمات متتالية (حوالي 3 ثوانٍ) لتأكيد الحدث
+            if self.consecutive_apnea_windows >= 3:
+                self.apnea_event_count += 1
+                self.apnea_warning_triggered.emit(True, f"⚠️ انقطاع تنفس محتمل (HRV Pattern) #{self.apnea_event_count}")
+                self.consecutive_apnea_windows = 0 # إعادة التعيين لمنع تكرار الإنذار لنفس الحدث
+            else:
+                self.apnea_warning_triggered.emit(False, "نمط HRV طبيعي")
 
     def _handle_leads_off(self, is_off: bool):
         if is_off:
             self.sensor_status_changed.emit(False, "Electrode Disconnected!")
-            self.bpm_history = []
-            # ── NEW: Reset filter state so reconnecting doesn't cause a spike ──
-            self.is_first_sample = True
+            self.peak_detector.last_peak_absolute_time = 0
+            self.peak_detector.edr_times = []
+            self.peak_detector.edr_amps = []
+            self.is_first_chunk = True
+            self.brpm_history.clear()
+            # إعادة تعيين سجلات HRV عند فصل المستشعر لمنع بيانات فاسدة
+            self.rr_history.clear()
+            self.baseline_rmssd.clear()
+            self.baseline_sdrr.clear()
+            self.ai_history.clear()
+            self.consecutive_apnea_windows = 0
         else:
             self.sensor_status_changed.emit(True, "Sensor Connected Normally")
 
