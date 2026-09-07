@@ -107,10 +107,10 @@ class ECGPeakDetector(QThread):
             t_uniform = np.arange(self.edr_times[0], self.edr_times[-1], 0.25) 
             edr_signal = f(t_uniform)
             
-            # --- FIX 1: Aligned with Proposal (0.15Hz - 0.4Hz) ---
             edr_filtered = self._butter_bandpass_filter(edr_signal, 0.15, 0.4, 4.0)
-            
             breath_peaks = self._detect_breath_peaks(edr_filtered)
+            
+            # --- ACCURACY IMPROVEMENT: Median Filtering & Outlier Rejection ---
             brpm = self._calculate_brpm_from_peaks(breath_peaks)
             
             ui_cutoff = t_uniform[-1] - 30.0
@@ -141,13 +141,21 @@ class ECGPeakDetector(QThread):
         return breath_peaks
 
     def _calculate_brpm_from_peaks(self, breath_peaks):
+        """
+        ACCURACY IMPROVEMENT:
+        1. Converts intervals to BrPM.
+        2. Rejects outliers (faster than 40 BrPM or slower than 5 BrPM).
+        3. Uses Median instead of Mean to ignore double-detected noise.
+        """
         if len(breath_peaks) > 1:
             breath_intervals_sec = np.diff(breath_peaks) * 0.25 
-            avg_interval = np.mean(breath_intervals_sec)
-            brpm = 60.0 / avg_interval
-            if not (3.0 < brpm < 35.0): 
-                return 0.0
-            return brpm
+            brpm_values = 60.0 / breath_intervals_sec
+            
+            # Outlier rejection
+            valid_brpm = [b for b in brpm_values if 5.0 < b < 40.0]
+            
+            if valid_brpm:
+                return float(np.median(valid_brpm))
         return 0.0
 
     def _butter_bandpass_filter(self, data, lowcut, highcut, fs, order=3):
@@ -183,7 +191,6 @@ class ECGService(QObject):
         self.live_b, self.live_a = butter(2, [0.5 / nyquist, 40.0 / nyquist], btype='band')
         self.live_zi = lfilter_zi(self.live_b, self.live_a)
         self.is_first_chunk = True
-        self.brpm_history = []
 
         self._live_buffer = []
         self._chunk_size = 10
@@ -194,9 +201,16 @@ class ECGService(QObject):
         self.ai_history = deque(maxlen=60)
         self.consecutive_apnea_windows = 0
         self.apnea_event_count = 0
-        
-        # --- FIX 2: Add Cooldown to prevent double-counting ---
         self.apnea_cooldown = 0 
+
+        # --- STABILITY IMPROVEMENT: BrPM Smoothing State ---
+        self.last_valid_brpm = 0.0
+        self.ema_brpm = 0.0
+        self.last_emitted_brpm = 0.0
+        self.brpm_grace_counter = 0
+        self.BRPM_GRACE_LIMIT = 3      # Hold last value for 3 updates (~3 seconds)
+        self.BRPM_SLEW_RATE = 2.0      # Max change of 2 BrPM per update
+        self.BRPM_EMA_ALPHA = 0.3      # Smoothing factor
 
         self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
         self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
@@ -227,27 +241,59 @@ class ECGService(QObject):
             self._live_buffer = []
 
     def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
-                                 edr_t, edr_sig, breath_x, breath_y, brpm):
+                                 edr_t, edr_sig, breath_x, breath_y, raw_brpm):
         self.bpm_updated.emit(bpm)
         self.rr_updated.emit(rr_intervals_ms)
         self.peaks_detected.emit(x_peaks, y_peaks)
         if edr_t:
             self.edr_graph_updated.emit(edr_t, edr_sig, breath_x, breath_y)
 
-        self._update_and_emit_brpm(brpm)
+        # --- STABILITY IMPROVEMENT: Apply Smoothing Pipeline ---
+        self._update_and_emit_brpm(raw_brpm)
 
         if rr_intervals_ms:
             self._process_rr_for_hrv(rr_intervals_ms)
 
-    def _update_and_emit_brpm(self, brpm):
-        if brpm > 0:
-            self.brpm_history.append(brpm)
-            if len(self.brpm_history) > 6:
-                self.brpm_history.pop(0)
-            smoothed_brpm = sum(self.brpm_history) / len(self.brpm_history)
-            self.brpm_updated.emit(smoothed_brpm)
+    def _update_and_emit_brpm(self, raw_brpm):
+        """
+        STABILITY IMPROVEMENT:
+        1. Zero-hold grace period.
+        2. Exponential Moving Average (EMA).
+        3. Slew-rate limiter.
+        """
+        # 1. Zero-hold grace period
+        if raw_brpm == 0.0:
+            self.brpm_grace_counter += 1
+            if self.brpm_grace_counter < self.BRPM_GRACE_LIMIT:
+                # Still in grace period, emit last valid smoothed value
+                self.brpm_updated.emit(self.ema_brpm if self.ema_brpm > 0 else self.last_valid_brpm)
+                return
+            else:
+                # Grace period over, signal is truly lost
+                self.brpm_updated.emit(0.0)
+                self.last_valid_brpm = 0.0
+                self.ema_brpm = 0.0
+                self.last_emitted_brpm = 0.0
+                return
         else:
-            self.brpm_updated.emit(0.0)
+            # Reset grace counter on valid signal
+            self.brpm_grace_counter = 0
+            self.last_valid_brpm = raw_brpm
+
+        # 2. Exponential Moving Average (EMA)
+        if self.ema_brpm == 0.0:
+            self.ema_brpm = raw_brpm
+        else:
+            self.ema_brpm = (self.BRPM_EMA_ALPHA * raw_brpm) + ((1 - self.BRPM_EMA_ALPHA) * self.ema_brpm)
+
+        # 3. Slew-rate limiter
+        if self.last_emitted_brpm > 0:
+            diff = self.ema_brpm - self.last_emitted_brpm
+            if abs(diff) > self.BRPM_SLEW_RATE:
+                self.ema_brpm = self.last_emitted_brpm + (self.BRPM_SLEW_RATE if diff > 0 else -self.BRPM_SLEW_RATE)
+        
+        self.last_emitted_brpm = self.ema_brpm
+        self.brpm_updated.emit(self.ema_brpm)
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
         for rr in rr_intervals_ms:
@@ -300,11 +346,10 @@ class ECGService(QObject):
     def _run_apnea_state_machine(self, ai):
         self.ai_history.append(ai)
 
-        # --- FIX 2: Cooldown Logic ---
         if self.apnea_cooldown > 0:
             self.apnea_cooldown -= 1
             if ai < (np.mean(self.ai_history) if self.ai_history else 2.5):
-                self.consecutive_apnea_windows = 0 # Reset if patient recovers
+                self.consecutive_apnea_windows = 0
             return
 
         if len(self.ai_history) > 15:
@@ -320,7 +365,7 @@ class ECGService(QObject):
                 self.apnea_event_count += 1
                 self.apnea_warning_triggered.emit(True, f"⚠️ CONFIRMED APNEA EVENT #{self.apnea_event_count}")
                 self.consecutive_apnea_windows = 0
-                self.apnea_cooldown = 15 # Ignore high AI for the next 15 seconds (Cooldown)
+                self.apnea_cooldown = 15
             else:
                 self.apnea_warning_triggered.emit(False, "Normal HRV Pattern")
 
@@ -347,13 +392,17 @@ class ECGService(QObject):
             self.peak_detector.edr_amps = []
             self.is_first_chunk = True
             self._live_buffer = []
-            self.brpm_history.clear()
             self.rr_history.clear()
             self.baseline_rmssd.clear()
             self.baseline_sdrr.clear()
             self.ai_history.clear()
             self.consecutive_apnea_windows = 0
             self.apnea_cooldown = 0
+            # Reset BrPM stability state
+            self.last_valid_brpm = 0.0
+            self.ema_brpm = 0.0
+            self.last_emitted_brpm = 0.0
+            self.brpm_grace_counter = 0
         else:
             self.sensor_status_changed.emit(True, "Sensor Connected Normally")
 
