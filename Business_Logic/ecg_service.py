@@ -296,17 +296,22 @@ class ECGService(QObject):
         self.brpm_updated.emit(self.ema_brpm)
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
+        """إضافة فترات RR وتنظيفها وإجراء التحليل عند توفر نافذة زمنية كافية"""
         for rr in rr_intervals_ms:
             self.rr_history.append(rr)
         
-        if len(self.rr_history) >= 30:
+        # التقييم يبدأ عند توفر 40 نبضة على الأقل (حوالي 40-50 ثانية)
+        if len(self.rr_history) >= 40:
             self._evaluate_apnea_index()
 
     def _evaluate_apnea_index(self):
+        """المعالج الرئيسي لمؤشر Apnea Index المعدل"""
         current_rr = list(self.rr_history)
-        rmssd_t, sdrr_t = self._calculate_hrv_features(current_rr)
-        
-        self.hrv_updated.emit(rmssd_t)
+        rmssd_t, sdrr_t, sd2_ratio = self._calculate_hrv_features(current_rr)
+
+        # إرسال RMSSD الدقيق للواجهة
+        self.hrv_updated.emit(round(rmssd_t, 1))
+
         if rmssd_t == 0 or sdrr_t == 0:
             return
 
@@ -314,16 +319,39 @@ class ECGService(QObject):
         if z_rmssd is None:
             return
 
-        ai = self._calculate_apnea_index_score(z_rmssd, z_sdrr)
-        self.apnea_index_updated.emit(ai)
+        # 3. معادلة Apnea Index معدلة تشمل انخفاض RMSSD مع ارتفاع SDRR ونسبة Poincaré
+        ai = self._calculate_apnea_index_score(z_rmssd, z_sdrr, sd2_ratio)
+        self.apnea_index_updated.emit(round(ai, 2))
 
         self._run_apnea_state_machine(ai)
+    
+    def _clean_rr_series(self, raw_rr_list):
+        """1. إزالة الضربات الهاجرة (Ectopic Beats) والتشوهات النسبية"""
+        if len(raw_rr_list) < 5:
+            return raw_rr_list
+
+        med_rr = np.median(raw_rr_list)
+        clean_rr = []
+
+        for i, rr in enumerate(raw_rr_list):
+            # استبعاد النبضات التي تنحرف بأكثر من 20% عن وسيط النافذة
+            if 0.8 * med_rr <= rr <= 1.2 * med_rr:
+                if clean_rr and abs(rr - clean_rr[-1]) > (0.25 * clean_rr[-1]):
+                    continue  # استبعاد التغيرات المفاجئة جداً بين نبضتين متتاليتين (Artifacts)
+                clean_rr.append(rr)
+
+        return clean_rr if len(clean_rr) >= 10 else list(raw_rr_list)
 
     def _calculate_hrv_features(self, rr_list):
-        rmssd = self._calculate_rmssd(rr_list)
-        sdrr = self._calculate_sdrr(rr_list)
-        return rmssd, sdrr
+        """2. حساب مؤشرات الوقت (RMSSD, SDRR) ومؤشرات Poincaré (SD1, SD2)"""
+        clean_rr = self._clean_rr_series(rr_list)
+        
+        rmssd = self._calculate_rmssd(clean_rr)
+        sdrr = self._calculate_sdrr(clean_rr)
+        sd1, sd2_ratio = self._calculate_poincare_metrics(clean_rr)
 
+        return rmssd, sdrr, sd2_ratio
+    
     def _update_baseline_and_calculate_z_scores(self, rmssd_t, sdrr_t):
         self.baseline_rmssd.append(rmssd_t)
         self.baseline_sdrr.append(sdrr_t)
@@ -340,8 +368,39 @@ class ECGService(QObject):
         z_sdrr = (sdrr_t - med_sdrr) / (1.4826 * mad_sdrr)
         return z_rmssd, z_sdrr
 
-    def _calculate_apnea_index_score(self, z_rmssd, z_sdrr):
-        return max(0.0, -z_rmssd) * (1.0 + max(0.0, z_sdrr))
+    def _calculate_poincare_metrics(self, clean_rr):
+        """حساب نسبة SD1/SD2 للتفرقة بين التنشيط الجارسمبثاوي والسمبثاوي"""
+        if len(clean_rr) < 4:
+            return 0.0, 1.0
+
+        diff_rr = np.diff(clean_rr)
+        var_diff = np.var(diff_rr)
+        var_rr = np.var(clean_rr)
+
+        sd1 = np.sqrt(0.5 * var_diff)
+        
+        # حماية إضافية: في حالات الضوضاء الشديدة، قد تصبح sd2_sq سالبة بسبب أخطاء الفاصلة العائمة
+        sd2_sq = (2 * var_rr) - (0.5 * var_diff)
+        sd2 = np.sqrt(max(1e-5, sd2_sq)) # استخدام 1e-5 بدلاً من 1.0 للحفاظ على الدقة الرياضية
+
+        # حماية من القسمة على صفر
+        ratio = float(sd1 / sd2) if sd2 > 0 else 1.0 
+
+        return float(sd1), ratio
+    
+    def _calculate_apnea_index_score(self, z_rmssd, z_sdrr, sd2_ratio):
+        """
+        حساب الدرجة:
+        - انخفاض Z_RMSSD (قيمة سالبة) يشير إلى كتم النفس/انخفاض HRV المتردد
+        - ارتفاع Z_SDRR (قيمة موجبة) يشير إلى عدم انتظام النبض الدوري (CVHR)
+        """
+        rmssd_drop = max(0.0, -z_rmssd)
+        sdrr_surge = max(0.0, z_sdrr)
+        
+        # كتم النفس يقلل من نسبة SD1/SD2 (SD2 يرتفع بسبب التباين الكلي)
+        poincare_factor = 1.2 if sd2_ratio < 0.5 else 1.0
+
+        return float(rmssd_drop * (1.0 + sdrr_surge) * poincare_factor)
 
     def _run_apnea_state_machine(self, ai):
         self.ai_history.append(ai)
