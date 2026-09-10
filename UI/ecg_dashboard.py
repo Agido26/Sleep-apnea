@@ -54,20 +54,6 @@ class ECGDashboard(QMainWindow):
                                                 symbolBrush='r', symbolSize=10, name="R-Peaks")
         main_layout.addWidget(self.ecg_graph)
 
-        # --- GRAPH 2: EDR (Respiration) ---
-        self.edr_graph = pg.PlotWidget()
-        self.edr_graph.setBackground('w')
-        self.edr_graph.setTitle("ECG-Derived Respiration (EDR) - Last 30 Seconds", color="k", size="15pt")
-        self.edr_graph.showGrid(x=True, y=True)
-        self.edr_graph.setLabel('bottom', 'Time', units='s')
-        self.edr_graph.setLabel('left', 'Amplitude')
-
-        pen_edr = pg.mkPen(color='g', width=2)
-        self.edr_line = self.edr_graph.plot([], [], pen=pen_edr, name="Respiratory Signal")
-        self.breath_scatter = self.edr_graph.plot([], [], pen=None, symbol='o', 
-                                                  symbolBrush='y', symbolSize=12, name="Breath Peaks")
-        main_layout.addWidget(self.edr_graph)
-
         container = QWidget()
         container.setLayout(main_layout)
         self.setCentralWidget(container)
