@@ -252,19 +252,69 @@ class ECGService(QObject):
         return float(sd1), ratio
 
     def _evaluate_apnea_index(self):
+        """النسخة المبسطة والمحمية من تلوث خط الأساس"""
         current_rr = list(self.rr_history)
-        rmssd_t, sdrr_t, sd2_ratio = self._calculate_hrv_features(current_rr)
+        clean_rr = self._clean_rr_series(current_rr)
+        
+        rmssd_t = self._calculate_rmssd(clean_rr)
         self.hrv_updated.emit(round(rmssd_t, 1))
 
-        if rmssd_t == 0 or sdrr_t == 0: return
+        if rmssd_t == 0: 
+            return
 
-        z_rmssd, z_sdrr = self._update_baseline_and_calculate_z_scores(rmssd_t, sdrr_t)
-        if z_rmssd is None: return
+        # 1. مرحلة التهيئة: لو لسه مجمعناش 10 قراءات، اقبل أي حاجة عشان نبني خط الأساس
+        if len(self.baseline_rmssd) < 10:
+            self.baseline_rmssd.append(rmssd_t)
+            return
 
-        ai = self._calculate_apnea_index_score(z_rmssd, z_sdrr, sd2_ratio)
-        self.apnea_index_updated.emit(round(ai, 2))
-        self._run_apnea_state_machine(ai)
+        # 2. حساب الطبيعي بناءً على القراءات النظيفة السابقة
+        normal_rmssd = np.median(self.baseline_rmssd)
+        drop_ratio = rmssd_t / normal_rmssd if normal_rmssd > 0 else 1.0
 
+        # 3. التحديث الذكي (Smart Update): 
+        # لو النسبة أكبر من 0.75 (يعني الـ HRV طبيعي أو قريب من الطبيعي)، ضيفه لخط الأساس
+        # لو أقل من كده (شخص بيكتم نفسه)، تجاهله ومتخربش بيه خط الأساس!
+        if drop_ratio >= 0.75:
+            self.baseline_rmssd.append(rmssd_t)
+        
+        # إرسال النسبة للواجهة
+        self.apnea_index_updated.emit(round(drop_ratio, 2))
+
+        # 4. تشغيل ماكينة الحالة بناءً على الانخفاض
+        self._run_simplified_state_machine(drop_ratio, rmssd_t, normal_rmssd)
+
+    def _run_simplified_state_machine(self, drop_ratio, current_rmssd, normal_rmssd):
+        # 1. تحديد الحدث: إذا نزل RMSSD لأقل من 55% من طبيعة المريض
+        # (مثلاً كان 60 ونزل لـ 33 أو أقل)
+        is_apnea_suspected = drop_ratio < 0.55 
+
+        # 2. فترة التبريد لمنع تكرار الإنذار لنفس الحدث
+        if self.apnea_cooldown > 0:
+            self.apnea_cooldown -= 1
+            if not is_apnea_suspected:
+                self.consecutive_apnea_windows = 0
+            return
+
+        # 3. التأكد من أن الانخفاض مستمر وليس مجرد هفوة لحظية
+        if is_apnea_suspected:
+            self.consecutive_apnea_windows += 1
+        else:
+            self.consecutive_apnea_windows = 0
+
+        # 4. إطلاق الإنذار إذا استمر الانخفاض لنافذتين متتاليتين (حوالي 10-15 ثانية)
+        if self.consecutive_apnea_windows >= 2:
+            self.apnea_event_count += 1
+            
+            # رسالة واضحة توضح القيم على الشاشة
+            msg = f"⚠️ انقطاع تنفس! (HRV نزل من {int(normal_rmssd)} لـ {int(current_rmssd)})"
+            self.apnea_warning_triggered.emit(True, msg)
+            self.apnea_event_count_updated.emit(self.apnea_event_count)
+            
+            self.consecutive_apnea_windows = 0
+            self.apnea_cooldown = 15  # تبريد لـ 15 نافذة
+        else:
+            self.apnea_warning_triggered.emit(False, f"HRV طبيعي: {int(current_rmssd)} ms")
+    
     def _update_baseline_and_calculate_z_scores(self, rmssd_t, sdrr_t):
         self.baseline_rmssd.append(rmssd_t)
         self.baseline_sdrr.append(sdrr_t)
