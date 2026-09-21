@@ -156,10 +156,15 @@ class ECGService(QObject):
         self.rr_updated.emit(rr_intervals_ms)
         self.peaks_detected.emit(x_peaks, y_peaks)
         
+        # Calculate and emit HRV
+        if rr_intervals_ms and len(rr_intervals_ms) >= 2:
+            hrv_value = self._calculate_rmssd(rr_intervals_ms)
+            self.hrv_updated.emit(round(hrv_value, 1))
+        
         if rr_intervals_ms:
             latest_rr = rr_intervals_ms[-1]
             # Log the reading
-            self.log_reading(bpm, latest_rr, 0.0, is_apnea=False)  # HRV logged separately
+            self.log_reading(bpm, latest_rr, hrv_value if rr_intervals_ms else 0.0, is_apnea=False)
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
         for rr in rr_intervals_ms:
@@ -231,6 +236,7 @@ class ECGService(QObject):
             self.apnea_warning_triggered.emit(False, f"Normal HRV: {int(current_rmssd)} ms")
 
     def _calculate_rmssd(self, rr_list):
+        """Calculate RMSSD from RR intervals"""
         if len(rr_list) < 2: 
             return 0.0
         diff_rr = np.diff(rr_list)
