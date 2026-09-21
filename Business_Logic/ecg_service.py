@@ -5,6 +5,7 @@ from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 from scipy.signal import find_peaks, butter, filtfilt, lfilter, lfilter_zi
 from scipy.interpolate import interp1d
+from Data.data_logger import SessionDataLogger
 
 class ECGPeakDetector(QThread):
     """Thread 2: Peak detection, RR, and EDR extraction"""
@@ -191,6 +192,13 @@ class ECGService(QObject):
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
+        # Initialize Data Logger
+        self.data_logger = SessionDataLogger()
+        self.data_logger.create_session()
+        
+        # Track last HRV for event logging
+        self.last_hrv_value = 0.0
+        self.last_rr_interval = 0.0
 
     def start_monitoring(self): self.reader.start()
     def stop_monitoring(self):
@@ -215,6 +223,20 @@ class ECGService(QObject):
 
         if rr_intervals_ms:
             self._process_rr_for_hrv(rr_intervals_ms)
+
+        if rr_intervals_ms:
+            latest_rr = rr_intervals_ms[-1]
+            self.last_rr_interval = latest_rr
+        
+        # Log reading (will be updated with apnea flag when event detected)
+        self.data_logger.log_reading(
+            bpm=bpm,
+            rr_interval=latest_rr,
+            hrv_rmssd=self.last_hrv_value,
+            is_apnea=False  # Will be updated if apnea detected
+        )
+        
+        self._process_rr_for_hrv(rr_intervals_ms)
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
         for rr in rr_intervals_ms:
@@ -305,7 +327,21 @@ class ECGService(QObject):
         if self.consecutive_apnea_windows >= 2:
             self.apnea_event_count += 1
             
-            # رسالة واضحة توضح القيم على الشاشة
+            # Log the apnea event with details
+            self.data_logger.log_apnea_event(
+                event_number=self.apnea_event_count,
+                hrv_before=normal_rmssd,
+                hrv_during=current_rmssd
+            )
+            
+            # Also mark this in the ECG log
+            self.data_logger.log_reading(
+                bpm=0,  # Current BPM
+                rr_interval=self.last_rr_interval,
+                hrv_rmssd=current_rmssd,
+                is_apnea=True
+            )
+            
             msg = f"⚠️ انقطاع تنفس! (HRV نزل من {int(normal_rmssd)} لـ {int(current_rmssd)})"
             self.apnea_warning_triggered.emit(True, msg)
             self.apnea_event_count_updated.emit(self.apnea_event_count)
@@ -396,3 +432,48 @@ class ECGService(QObject):
 
     def _handle_connection_error(self, error_msg: str):
         self.sensor_status_changed.emit(False, f"Error: {error_msg}")
+
+    def generate_report_data(self):
+        """Called when user clicks 'Generate Report' button"""
+        summary = self.data_logger.get_session_summary()
+        if summary is None:
+            return None
+        
+        # Calculate pattern analysis
+        events = summary['events']
+        pattern_analysis = self._analyze_event_pattern(events)
+        
+        return {
+            'total_events': summary['total_events'],
+            'duration': summary['duration_formatted'],
+            'events_timeline': events,
+            'pattern': pattern_analysis,
+            'session_path': summary['session_folder']
+        }
+    
+    def _analyze_event_pattern(self, events):
+        """Analyze if events are clustered or scattered"""
+        if len(events) < 2:
+            return "Insufficient data for pattern analysis"
+        
+        # Calculate time between events
+        intervals = []
+        for i in range(1, len(events)):
+            try:
+                time1 = float(events[i-1]['Time_From_Start'].split()[0])
+                time2 = float(events[i]['Time_From_Start'].split()[0])
+                intervals.append(time2 - time1)
+            except:
+                continue
+        
+        if not intervals:
+            return "Unable to calculate pattern"
+        
+        avg_interval = sum(intervals) / len(intervals)
+        
+        if avg_interval < 120:  # Less than 2 minutes apart
+            return "CLUSTERED - Events occurring frequently (possible true sleep apnea)"
+        elif avg_interval < 600:  # Less than 10 minutes apart
+            return "MODERATE - Events scattered throughout session"
+        else:
+            return "SCATTERED - Events far apart (possibly positional or normal variation)"
