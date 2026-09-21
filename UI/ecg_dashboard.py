@@ -1,9 +1,10 @@
 import sys
 from collections import deque
-from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QVBoxLayout, QWidget, QHBoxLayout
+from PyQt6.QtWidgets import QMainWindow, QApplication, QLabel, QMessageBox, QPushButton, QVBoxLayout, QWidget, QHBoxLayout
 from PyQt6.QtCore import Qt, QTimer
 import pyqtgraph as pg
 from Business_Logic.ecg_service import ECGService
+from UI.report_window import ReportWindow
 
 class ECGDashboard(QMainWindow):
     def __init__(self):
@@ -41,6 +42,17 @@ class ECGDashboard(QMainWindow):
         info_layout.addWidget(self.apnea_count_label)
         main_layout.addLayout(info_layout)
 
+        self.report_btn = QPushButton("Generate Clinical Report")
+        self.report_btn.setStyleSheet("""
+            font-size: 18px; 
+            font-weight: bold; 
+            padding: 15px; 
+            background-color: #2196F3; 
+            color: white; 
+            border-radius: 5px;
+        """)
+        self.report_btn.clicked.connect(self.open_report)
+        info_layout.addWidget(self.report_btn)
         # --- GRAPH 1: ECG ---
         self.ecg_graph = pg.PlotWidget()
         self.ecg_graph.setBackground('w')
@@ -161,6 +173,15 @@ class ECGDashboard(QMainWindow):
     def closeEvent(self, event):
         self.ecg_service.stop_monitoring()
         super().closeEvent(event)
+
+    def open_report(self):
+        """Generate and show report window"""
+        report_data = self.ecg_service.generate_report_data()
+        if report_data:
+            self.report_window = ReportWindow(report_data)
+            self.report_window.show()
+        else:
+            QMessageBox.warning(self, "No Data", "No session data available to generate report.")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
