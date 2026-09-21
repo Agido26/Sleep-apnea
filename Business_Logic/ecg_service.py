@@ -4,6 +4,9 @@ from collections import deque
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 from scipy.signal import find_peaks, butter, filtfilt, lfilter, lfilter_zi
+import csv
+from datetime import datetime
+from pathlib import Path
 
 class ECGPeakDetector(QThread):
     """Thread 2: Peak detection, RR, and HRV extraction"""
@@ -126,6 +129,11 @@ class ECGService(QObject):
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
+        # CSV Logging
+        self.session_folder = None
+        self.csv_file = None
+        self.csv_writer = None
+        self.create_session_folder()
 
     def start_monitoring(self): 
         self.reader.start()
@@ -133,6 +141,7 @@ class ECGService(QObject):
     def stop_monitoring(self):
         self.reader.stop()
         self.peak_detector.stop()
+        self.close_session()  # Close CSV file
 
     def _process_live_chunk(self, chunk: list):
         if self.is_first_chunk:
@@ -148,7 +157,9 @@ class ECGService(QObject):
         self.peaks_detected.emit(x_peaks, y_peaks)
         
         if rr_intervals_ms:
-            self._process_rr_for_hrv(rr_intervals_ms)
+            latest_rr = rr_intervals_ms[-1]
+            # Log the reading
+            self.log_reading(bpm, latest_rr, 0.0, is_apnea=False)  # HRV logged separately
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
         for rr in rr_intervals_ms:
@@ -246,3 +257,36 @@ class ECGService(QObject):
 
     def _handle_connection_error(self, error_msg: str):
         self.sensor_status_changed.emit(False, f"Error: {error_msg}")
+
+    
+    def create_session_folder(self):
+        """Create session folder and CSV file"""
+        sessions_dir = Path("sessions")
+        sessions_dir.mkdir(exist_ok=True)
+    
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        self.session_folder = sessions_dir / timestamp
+        self.session_folder.mkdir(exist_ok=True)
+        
+        self.csv_file = self.session_folder / "ecg_readings.csv"
+        self.csv_file_handle = open(self.csv_file, 'w', newline='')
+        self.csv_writer = csv.writer(self.csv_file_handle)
+        self.csv_writer.writerow([
+            'Timestamp', 'BPM', 'RR_Interval_ms', 'HRV_RMSSD', 'Is_Apnea_Event'
+        ])
+        print(f"[LOG] Session started: {self.session_folder}")
+
+    def log_reading(self, bpm, rr_interval, hrv_rmssd, is_apnea=False):
+        """Log reading to CSV"""
+        if self.csv_writer and self.csv_file_handle:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.csv_writer.writerow([
+                timestamp, bpm, rr_interval, round(hrv_rmssd, 2), 1 if is_apnea else 0
+            ])
+            self.csv_file_handle.flush()
+
+    def close_session(self):
+        """Close CSV file"""
+        if self.csv_file_handle and not self.csv_file_handle.closed:
+            self.csv_file_handle.close()
+            print(f"[LOG] Session saved to: {self.session_folder}")
