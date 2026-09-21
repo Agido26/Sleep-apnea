@@ -236,7 +236,6 @@ class ECGService(QObject):
             self.apnea_warning_triggered.emit(False, f"Normal HRV: {int(current_rmssd)} ms")
 
     def _calculate_rmssd(self, rr_list):
-        """Calculate RMSSD from RR intervals"""
         if len(rr_list) < 2: 
             return 0.0
         diff_rr = np.diff(rr_list)
