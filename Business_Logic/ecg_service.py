@@ -4,13 +4,11 @@ from collections import deque
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 from scipy.signal import find_peaks, butter, filtfilt, lfilter, lfilter_zi
-from scipy.interpolate import interp1d
-from Data.data_logger import SessionDataLogger
 
 class ECGPeakDetector(QThread):
-    """Thread 2: Peak detection, RR, and EDR extraction"""
-    # Emits 8 arguments (BrPM removed)
-    analysis_results = pyqtSignal(int, list, list, list, list, list, list, list)
+    """Thread 2: Peak detection, RR, and HRV extraction"""
+    # Emits: (bpm, x_peaks_ui, y_peaks_ui, rr_intervals_ms)
+    analysis_results = pyqtSignal(int, list, list, list)
 
     def __init__(self, sample_rate=250):
         super().__init__()
@@ -19,8 +17,6 @@ class ECGPeakDetector(QThread):
         self.is_running = True
         self.absolute_sample_count = 0 
         self.last_peak_absolute_time = 0 
-        self.edr_times = []
-        self.edr_amps = []
 
     def add_buffer(self, raw_buffer, smoothed_buffer):
         self.data_queue.put((raw_buffer, smoothed_buffer))
@@ -37,42 +33,24 @@ class ECGPeakDetector(QThread):
         raw_data = np.array(raw_buffer)
         smoothed_data = np.array(smoothed_buffer)
 
-        filtered_data, peaks = self._detect_r_peaks(raw_data)
-        self.absolute_sample_count += len(raw_data)
-
-        if len(peaks) > 0:
-            absolute_peaks = [int(p) + self.absolute_sample_count - len(raw_data) for p in peaks]
-            self._update_edr_history(peaks, filtered_data, absolute_peaks)
-            rr_intervals_ms = self._calculate_rr_intervals(absolute_peaks)
-            self.last_peak_absolute_time = absolute_peaks[-1]
-            real_bpm = self._calculate_bpm(rr_intervals_ms)
-            x_indices, y_values = self._map_ecg_peaks_to_ui(peaks, smoothed_data, len(raw_data))
-            edr_t_ui, edr_signal_ui, breath_x, breath_y = self._process_edr_and_respiration()
-
-            # Emit 8 arguments (BrPM removed)
-            self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms, 
-                                       edr_t_ui, edr_signal_ui, breath_x, breath_y)
-        else:
-            self.analysis_results.emit(0, [], [], [], [], [], [], [])
-
-    def _detect_r_peaks(self, raw_data):
+        # 1. Filter & Detect Peaks
         filtered_data = self._butter_bandpass_filter(raw_data, 0.5, 40.0, self.sample_rate)
         threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
         min_distance = int(self.sample_rate * 0.4)
         peaks, _ = find_peaks(filtered_data, height=threshold, distance=min_distance)
-        return filtered_data, peaks
 
-    def _update_edr_history(self, peaks, filtered_data, absolute_peaks):
-        new_amps = [float(filtered_data[p]) for p in peaks]
-        new_times = [float(p) / self.sample_rate for p in absolute_peaks]
-        self.edr_amps.extend(new_amps)
-        self.edr_times.extend(new_times)
+        if len(peaks) > 0:
+            absolute_peaks = [int(p) + self.absolute_sample_count - len(raw_data) for p in peaks]
+            rr_intervals_ms = self._calculate_rr_intervals(absolute_peaks)
+            self.last_peak_absolute_time = absolute_peaks[-1]
+            real_bpm = self._calculate_bpm(rr_intervals_ms)
+            x_indices, y_values = self._map_ecg_peaks_to_ui(peaks, smoothed_data, len(raw_data))
 
-        if self.edr_times:
-            cutoff = self.edr_times[-1] - 60.0
-            valid_data = [(t, a) for t, a in zip(self.edr_times, self.edr_amps) if t > cutoff]
-            self.edr_times = [v[0] for v in valid_data]
-            self.edr_amps = [v[1] for v in valid_data]
+            # Emit 4 arguments ONLY (NO EDR)
+            self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms)
+        else:
+            self.absolute_sample_count += len(raw_data)
+            self.analysis_results.emit(0, [], [], [])
 
     def _calculate_rr_intervals(self, absolute_peaks):
         rr_intervals_ms = []
@@ -98,45 +76,6 @@ class ECGPeakDetector(QThread):
         y_values = [int(smoothed_data[p]) for p in peaks if p >= offset]
         return x_indices, y_values
 
-    def _process_edr_and_respiration(self):
-        edr_t_ui, edr_signal_ui, breath_x, breath_y = [], [], [], []
-        if len(self.edr_times) <= 10:
-            return edr_t_ui, edr_signal_ui, breath_x, breath_y
-
-        try:
-            f = interp1d(self.edr_times, self.edr_amps, kind='cubic', fill_value="extrapolate")
-            t_uniform = np.arange(self.edr_times[0], self.edr_times[-1], 0.25) 
-            edr_signal = f(t_uniform)
-            edr_filtered = self._butter_bandpass_filter(edr_signal, 0.15, 0.4, 4.0)
-            breath_peaks = self._detect_breath_peaks(edr_filtered)
-            
-            ui_cutoff = t_uniform[-1] - 30.0
-            ui_mask = t_uniform >= ui_cutoff
-            edr_t_ui = t_uniform[ui_mask].tolist()
-            edr_signal_ui = edr_filtered[ui_mask].tolist()
-            
-            for bp in breath_peaks:
-                if t_uniform[bp] >= ui_cutoff:
-                    breath_x.append(t_uniform[bp])
-                    breath_y.append(edr_filtered[bp])            
-        except Exception as e:
-            print(f"EDR Calculation Error: {e}") 
-        
-        return edr_t_ui, edr_signal_ui, breath_x, breath_y
-
-    def _detect_breath_peaks(self, edr_filtered):
-        p95 = np.percentile(edr_filtered, 95)
-        p5 = np.percentile(edr_filtered, 5)
-        signal_range = p95 - p5 
-        max_abs_amp = np.max(np.abs(edr_filtered))
-        
-        if max_abs_amp > 0 and signal_range < (max_abs_amp * 0.15):
-            return []
-        
-        min_prominence = signal_range * 0.25
-        breath_peaks, _ = find_peaks(edr_filtered, distance=8, prominence=min_prominence)
-        return breath_peaks
-
     def _butter_bandpass_filter(self, data, lowcut, highcut, fs, order=3):
         nyquist = 0.5 * fs
         low = lowcut / nyquist
@@ -155,29 +94,24 @@ class ECGService(QObject):
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
     hrv_updated = pyqtSignal(float)
-    edr_graph_updated = pyqtSignal(list, list, list, list)
     peaks_detected = pyqtSignal(list, list)
     apnea_warning_triggered = pyqtSignal(bool, str)
-    apnea_event_count_updated = pyqtSignal(int)  # NEW: Signal for the event counter
+    apnea_event_count_updated = pyqtSignal(int)
     sensor_status_changed = pyqtSignal(bool, str)
-    apnea_index_updated = pyqtSignal(float)
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
         super().__init__()
         self.sample_rate = sample_rate
-
         nyquist = 0.5 * self.sample_rate
         self.live_b, self.live_a = butter(2, [0.5 / nyquist, 40.0 / nyquist], btype='band')
         self.live_zi = lfilter_zi(self.live_b, self.live_a)
         self.is_first_chunk = True
-
         self._live_buffer = []
         self._chunk_size = 10
 
-        # --- Advanced HRV & Apnea State Variables ---
+        # Advanced HRV & Apnea State Variables
         self.rr_history = deque(maxlen=150)
         self.baseline_rmssd = deque(maxlen=60)
-        self.baseline_sdrr = deque(maxlen=60)
         self.ai_history = deque(maxlen=60)
         self.consecutive_apnea_windows = 0
         self.apnea_event_count = 0
@@ -192,15 +126,10 @@ class ECGService(QObject):
         self.peak_detector.analysis_results.connect(self._handle_analysis_results)
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
-        # Initialize Data Logger
-        self.data_logger = SessionDataLogger()
-        self.data_logger.create_session()
-        
-        # Track last HRV for event logging
-        self.last_hrv_value = 0.0
-        self.last_rr_interval = 0.0
 
-    def start_monitoring(self): self.reader.start()
+    def start_monitoring(self): 
+        self.reader.start()
+
     def stop_monitoring(self):
         self.reader.stop()
         self.peak_detector.stop()
@@ -213,30 +142,13 @@ class ECGService(QObject):
         clean_chunk = [int(val + 512) for val in filtered_chunk]
         self.live_chunk_ready.emit(clean_chunk)
 
-    def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms, 
-                                 edr_t, edr_sig, breath_x, breath_y):
+    def _handle_analysis_results(self, bpm, x_peaks, y_peaks, rr_intervals_ms):
         self.bpm_updated.emit(bpm)
         self.rr_updated.emit(rr_intervals_ms)
         self.peaks_detected.emit(x_peaks, y_peaks)
-        if edr_t:
-            self.edr_graph_updated.emit(edr_t, edr_sig, breath_x, breath_y)
-
+        
         if rr_intervals_ms:
             self._process_rr_for_hrv(rr_intervals_ms)
-
-        if rr_intervals_ms:
-            latest_rr = rr_intervals_ms[-1]
-            self.last_rr_interval = latest_rr
-        
-        # Log reading (will be updated with apnea flag when event detected)
-        self.data_logger.log_reading(
-            bpm=bpm,
-            rr_interval=latest_rr,
-            hrv_rmssd=self.last_hrv_value,
-            is_apnea=False  # Will be updated if apnea detected
-        )
-        
-        self._process_rr_for_hrv(rr_intervals_ms)
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
         for rr in rr_intervals_ms:
@@ -245,7 +157,8 @@ class ECGService(QObject):
             self._evaluate_apnea_index()
 
     def _clean_rr_series(self, raw_rr_list):
-        if len(raw_rr_list) < 5: return raw_rr_list
+        if len(raw_rr_list) < 5: 
+            return raw_rr_list
         med_rr = np.median(raw_rr_list)
         clean_rr = []
         for rr in raw_rr_list:
@@ -259,171 +172,72 @@ class ECGService(QObject):
         clean_rr = self._clean_rr_series(rr_list)
         rmssd = self._calculate_rmssd(clean_rr)
         sdrr = self._calculate_sdrr(clean_rr)
-        sd1, sd2_ratio = self._calculate_poincare_metrics(clean_rr)
-        return rmssd, sdrr, sd2_ratio
-
-    def _calculate_poincare_metrics(self, clean_rr):
-        if len(clean_rr) < 4: return 0.0, 1.0
-        diff_rr = np.diff(clean_rr)
-        var_diff = np.var(diff_rr)
-        var_rr = np.var(clean_rr)
-        sd1 = np.sqrt(0.5 * var_diff)
-        sd2_sq = (2 * var_rr) - (0.5 * var_diff)
-        sd2 = np.sqrt(max(1e-5, sd2_sq))
-        ratio = float(sd1 / sd2) if sd2 > 0 else 1.0
-        return float(sd1), ratio
+        return rmssd, sdrr
 
     def _evaluate_apnea_index(self):
-        """النسخة المبسطة والمحمية من تلوث خط الأساس"""
         current_rr = list(self.rr_history)
-        clean_rr = self._clean_rr_series(current_rr)
-        
-        rmssd_t = self._calculate_rmssd(clean_rr)
+        rmssd_t, sdrr_t = self._calculate_hrv_features(current_rr)
         self.hrv_updated.emit(round(rmssd_t, 1))
 
-        if rmssd_t == 0: 
+        if rmssd_t == 0 or sdrr_t == 0: 
             return
 
-        # 1. مرحلة التهيئة: لو لسه مجمعناش 10 قراءات، اقبل أي حاجة عشان نبني خط الأساس
+        # Simple baseline calculation
         if len(self.baseline_rmssd) < 10:
             self.baseline_rmssd.append(rmssd_t)
             return
 
-        # 2. حساب الطبيعي بناءً على القراءات النظيفة السابقة
         normal_rmssd = np.median(self.baseline_rmssd)
         drop_ratio = rmssd_t / normal_rmssd if normal_rmssd > 0 else 1.0
 
-        # 3. التحديث الذكي (Smart Update): 
-        # لو النسبة أكبر من 0.75 (يعني الـ HRV طبيعي أو قريب من الطبيعي)، ضيفه لخط الأساس
-        # لو أقل من كده (شخص بيكتم نفسه)، تجاهله ومتخربش بيه خط الأساس!
         if drop_ratio >= 0.75:
             self.baseline_rmssd.append(rmssd_t)
-        
-        # إرسال النسبة للواجهة
-        self.apnea_index_updated.emit(round(drop_ratio, 2))
 
-        # 4. تشغيل ماكينة الحالة بناءً على الانخفاض
         self._run_simplified_state_machine(drop_ratio, rmssd_t, normal_rmssd)
 
     def _run_simplified_state_machine(self, drop_ratio, current_rmssd, normal_rmssd):
-        # 1. تحديد الحدث: إذا نزل RMSSD لأقل من 55% من طبيعة المريض
-        # (مثلاً كان 60 ونزل لـ 33 أو أقل)
         is_apnea_suspected = drop_ratio < 0.55 
 
-        # 2. فترة التبريد لمنع تكرار الإنذار لنفس الحدث
         if self.apnea_cooldown > 0:
             self.apnea_cooldown -= 1
             if not is_apnea_suspected:
                 self.consecutive_apnea_windows = 0
             return
 
-        # 3. التأكد من أن الانخفاض مستمر وليس مجرد هفوة لحظية
         if is_apnea_suspected:
             self.consecutive_apnea_windows += 1
         else:
             self.consecutive_apnea_windows = 0
 
-        # 4. إطلاق الإنذار إذا استمر الانخفاض لنافذتين متتاليتين (حوالي 10-15 ثانية)
         if self.consecutive_apnea_windows >= 2:
             self.apnea_event_count += 1
-            
-            # Log the apnea event with details
-            self.data_logger.log_apnea_event(
-                event_number=self.apnea_event_count,
-                hrv_before=normal_rmssd,
-                hrv_during=current_rmssd
-            )
-            
-            # Also mark this in the ECG log
-            self.data_logger.log_reading(
-                bpm=0,  # Current BPM
-                rr_interval=self.last_rr_interval,
-                hrv_rmssd=current_rmssd,
-                is_apnea=True
-            )
-            
-            msg = f"⚠️ انقطاع تنفس! (HRV نزل من {int(normal_rmssd)} لـ {int(current_rmssd)})"
+            msg = f"⚠️ Apnea Event! (HRV dropped from {int(normal_rmssd)} to {int(current_rmssd)})"
             self.apnea_warning_triggered.emit(True, msg)
             self.apnea_event_count_updated.emit(self.apnea_event_count)
-            
             self.consecutive_apnea_windows = 0
-            self.apnea_cooldown = 15  # تبريد لـ 15 نافذة
+            self.apnea_cooldown = 15
         else:
-            self.apnea_warning_triggered.emit(False, f"HRV طبيعي: {int(current_rmssd)} ms")
-    
-    def _update_baseline_and_calculate_z_scores(self, rmssd_t, sdrr_t):
-        self.baseline_rmssd.append(rmssd_t)
-        self.baseline_sdrr.append(sdrr_t)
-        if len(self.baseline_rmssd) < 10: return None, None
-
-        med_rmssd = np.median(self.baseline_rmssd)
-        mad_rmssd = self._calculate_mad(self.baseline_rmssd)
-        med_sdrr = np.median(self.baseline_sdrr)
-        mad_sdrr = self._calculate_mad(self.baseline_sdrr)
-
-        z_rmssd = (rmssd_t - med_rmssd) / (1.4826 * mad_rmssd)
-        z_sdrr = (sdrr_t - med_sdrr) / (1.4826 * mad_sdrr)
-        return z_rmssd, z_sdrr
-
-    def _calculate_apnea_index_score(self, z_rmssd, z_sdrr, sd2_ratio):
-        rmssd_drop = max(0.0, -z_rmssd)
-        sdrr_surge = max(0.0, z_sdrr)
-        poincare_factor = 1.2 if sd2_ratio < 0.5 else 1.0
-        return float(rmssd_drop * (1.0 + sdrr_surge) * poincare_factor)
-
-    def _run_apnea_state_machine(self, ai):
-        self.ai_history.append(ai)
-
-        if self.apnea_cooldown > 0:
-            self.apnea_cooldown -= 1
-            if ai < (np.mean(self.ai_history) if self.ai_history else 2.5):
-                self.consecutive_apnea_windows = 0
-            return
-
-        if len(self.ai_history) > 15:
-            threshold = np.mean(self.ai_history) + 2.5 * np.std(self.ai_history)
-            threshold = max(threshold, 2.5)
-            
-            if ai > threshold:
-                self.consecutive_apnea_windows += 1
-            else:
-                self.consecutive_apnea_windows = 0
-
-            if self.consecutive_apnea_windows >= 3:
-                self.apnea_event_count += 1
-                self.apnea_warning_triggered.emit(True, f"️ CONFIRMED APNEA EVENT")
-                self.apnea_event_count_updated.emit(self.apnea_event_count) # NEW: Update UI counter
-                self.consecutive_apnea_windows = 0
-                self.apnea_cooldown = 15
-            else:
-                self.apnea_warning_triggered.emit(False, "Normal HRV Pattern")
+            self.apnea_warning_triggered.emit(False, f"Normal HRV: {int(current_rmssd)} ms")
 
     def _calculate_rmssd(self, rr_list):
-        if len(rr_list) < 2: return 0.0
+        if len(rr_list) < 2: 
+            return 0.0
         diff_rr = np.diff(rr_list)
         return float(np.sqrt(np.mean(diff_rr**2)))
 
     def _calculate_sdrr(self, rr_list):
-        if len(rr_list) < 2: return 0.0
+        if len(rr_list) < 2: 
+            return 0.0
         return float(np.std(rr_list))
-
-    def _calculate_mad(self, data):
-        if not data: return 1.0
-        median = np.median(data)
-        mad = float(np.median(np.abs(data - median)))
-        return mad if mad > 0 else 1.0
 
     def _handle_leads_off(self, is_off: bool):
         if is_off:
             self.sensor_status_changed.emit(False, "Electrode Disconnected!")
             self.peak_detector.last_peak_absolute_time = 0
-            self.peak_detector.edr_times = []
-            self.peak_detector.edr_amps = []
             self.is_first_chunk = True
             self._live_buffer = []
             self.rr_history.clear()
             self.baseline_rmssd.clear()
-            self.baseline_sdrr.clear()
             self.ai_history.clear()
             self.consecutive_apnea_windows = 0
             self.apnea_cooldown = 0
@@ -432,48 +246,3 @@ class ECGService(QObject):
 
     def _handle_connection_error(self, error_msg: str):
         self.sensor_status_changed.emit(False, f"Error: {error_msg}")
-
-    def generate_report_data(self):
-        """Called when user clicks 'Generate Report' button"""
-        summary = self.data_logger.get_session_summary()
-        if summary is None:
-            return None
-        
-        # Calculate pattern analysis
-        events = summary['events']
-        pattern_analysis = self._analyze_event_pattern(events)
-        
-        return {
-            'total_events': summary['total_events'],
-            'duration': summary['duration_formatted'],
-            'events_timeline': events,
-            'pattern': pattern_analysis,
-            'session_path': summary['session_folder']
-        }
-    
-    def _analyze_event_pattern(self, events):
-        """Analyze if events are clustered or scattered"""
-        if len(events) < 2:
-            return "Insufficient data for pattern analysis"
-        
-        # Calculate time between events
-        intervals = []
-        for i in range(1, len(events)):
-            try:
-                time1 = float(events[i-1]['Time_From_Start'].split()[0])
-                time2 = float(events[i]['Time_From_Start'].split()[0])
-                intervals.append(time2 - time1)
-            except:
-                continue
-        
-        if not intervals:
-            return "Unable to calculate pattern"
-        
-        avg_interval = sum(intervals) / len(intervals)
-        
-        if avg_interval < 120:  # Less than 2 minutes apart
-            return "CLUSTERED - Events occurring frequently (possible true sleep apnea)"
-        elif avg_interval < 600:  # Less than 10 minutes apart
-            return "MODERATE - Events scattered throughout session"
-        else:
-            return "SCATTERED - Events far apart (possibly positional or normal variation)"
