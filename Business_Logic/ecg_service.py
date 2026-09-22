@@ -67,8 +67,12 @@ class ECGPeakDetector(QThread):
         return rr_intervals_ms
 
     def _calculate_bpm(self, rr_intervals_ms):
-        latest_rr_sec = rr_intervals_ms[-1] / 1000.0 if rr_intervals_ms else 1.0
-        return int(60 / latest_rr_sec) if rr_intervals_ms else 0
+        if not rr_intervals_ms:
+            return 0
+        # Average the last 5 beats (or fewer if we don't have 5 yet)
+        recent_rrs = rr_intervals_ms[-5:]
+        avg_rr_sec = (sum(recent_rrs) / len(recent_rrs)) / 1000.0
+        return int(60 / avg_rr_sec)
 
     def _map_ecg_peaks_to_ui(self, peaks, smoothed_data, buffer_len):
         ui_window_size = 1000
@@ -179,9 +183,9 @@ class ECGService(QObject):
         med_rr = np.median(raw_rr_list)
         clean_rr = []
         for rr in raw_rr_list:
-            if 0.8 * med_rr <= rr <= 1.2 * med_rr:
-                if clean_rr and abs(rr - clean_rr[-1]) > (0.25 * clean_rr[-1]):
-                    continue
+            # Relaxed bounds: allow within 30% of median (was 20%)
+            if 0.7 * med_rr <= rr <= 1.3 * med_rr:
+                # Removed the harsh 25% step-to-step restriction
                 clean_rr.append(rr)
         return clean_rr if len(clean_rr) >= 10 else list(raw_rr_list)
 
@@ -212,7 +216,7 @@ class ECGService(QObject):
         self._run_simplified_state_machine(drop_ratio, rmssd_t, normal_rmssd)
 
     def _run_simplified_state_machine(self, drop_ratio, current_rmssd, normal_rmssd):
-        is_apnea_suspected = drop_ratio < 0.55
+        is_apnea_suspected = drop_ratio < 0.65
 
         if self.apnea_cooldown > 0:
             self.apnea_cooldown -= 1
