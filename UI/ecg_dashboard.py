@@ -124,9 +124,9 @@ class ECGDashboard(QMainWindow):
         
         # Confirm end session
         reply = QMessageBox.question(self, 'End Session?', 
-                            'Are you sure you want to end this session?\n\nNo more data will be recorded after this.',
-                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
-                            QMessageBox.StandardButton.No)
+                    'Are you sure you want to end this session?\n\nNo more data will be recorded after this.',
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                    QMessageBox.StandardButton.No)
         
         if reply == QMessageBox.StandardButton.No:
             return

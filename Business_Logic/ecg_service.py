@@ -156,15 +156,18 @@ class ECGService(QObject):
         self.rr_updated.emit(rr_intervals_ms)
         self.peaks_detected.emit(x_peaks, y_peaks)
         
-        # Calculate and emit HRV
+        # FIX: Initialize hrv_value to 0.0 so it always exists
+        hrv_value = 0.0 
+        
+        # Calculate and emit HRV only if we have enough data
         if rr_intervals_ms and len(rr_intervals_ms) >= 2:
             hrv_value = self._calculate_rmssd(rr_intervals_ms)
             self.hrv_updated.emit(round(hrv_value, 1))
-        
+            
         if rr_intervals_ms:
             latest_rr = rr_intervals_ms[-1]
-            # Log the reading
-            self.log_reading(bpm, latest_rr, hrv_value if rr_intervals_ms else 0.0, is_apnea=False)
+            # Log the reading (now hrv_value is always defined)
+            self.log_reading(bpm, latest_rr, hrv_value, is_apnea=False)
 
     def _process_rr_for_hrv(self, rr_intervals_ms):
         for rr in rr_intervals_ms:
