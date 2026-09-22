@@ -7,8 +7,7 @@ import numpy as np
 from scipy.signal import find_peaks, butter, filtfilt
 
 class ECGSerialReader(QThread):
-    # تم تغيير الإشارة لتستقبل قائمة العينات (Chunk)
-    new_chunk_ready = pyqtSignal(list)  # <-- THIS WAS MISSING!
+    new_chunk_ready = pyqtSignal(list)
     buffer_updated = pyqtSignal(list, list)
     leads_off_detected = pyqtSignal(bool)
     connection_error = pyqtSignal(str)
@@ -21,16 +20,15 @@ class ECGSerialReader(QThread):
         self.window_seconds = window_seconds
         self.is_running = False
         self.serial_conn = None
-        self.buffer_size = self.sample_rate * self.window_seconds 
+        self.buffer_size = self.sample_rate * self.window_seconds
         self.fifo_buffer = deque(maxlen=self.buffer_size)
-        self.analysis_trigger = self.sample_rate * 1 
-        self.samples_since_last_analysis = 0 
+        self.analysis_trigger = self.sample_rate * 1
+        self.samples_since_last_analysis = 0
         self.ema_value = 0.0
         self.ema_alpha = 0.3
         self.smoothed_buffer = deque(maxlen=self.buffer_size)
         self.is_leads_off = False
-        # تجميع 10 عينات قبل إرسال الإشارة للواجهة
-        self.chunk_size = 10 
+        self.chunk_size = 10
         self.pending_chunk = []
 
     def _butter_bandpass_filter(self, data, lowcut=0.5, highcut=40.0, fs=250.0, order=3):
@@ -41,7 +39,7 @@ class ECGSerialReader(QThread):
         return filtfilt(b, a, data)
 
     def _analyze_window(self):
-        if len(self.fifo_buffer) < 50: 
+        if len(self.fifo_buffer) < 50:
             return
         self.buffer_updated.emit(list(self.fifo_buffer), list(self.smoothed_buffer))
 
@@ -65,7 +63,7 @@ class ECGSerialReader(QThread):
                     if not self.is_leads_off:
                         self.is_leads_off = True
                         self.leads_off_detected.emit(True)
-                        self.fifo_buffer.clear() 
+                        self.fifo_buffer.clear()
                         self.smoothed_buffer.clear()
                         self.samples_since_last_analysis = 0
                         self.pending_chunk.clear()
@@ -73,7 +71,7 @@ class ECGSerialReader(QThread):
                     if len(self.pending_chunk) >= self.chunk_size:
                         self.new_chunk_ready.emit(list(self.pending_chunk))
                         self.pending_chunk.clear()
-                    continue 
+                    continue
                 else:
                     if self.is_leads_off:
                         self.is_leads_off = False
@@ -85,14 +83,13 @@ class ECGSerialReader(QThread):
                 smoothed_int = int(self.ema_value)
                 self.smoothed_buffer.append(smoothed_int)
                 self.fifo_buffer.append(value)
-                # تجميع العينة المُنقاة في الـ Chunk
                 self.pending_chunk.append(smoothed_int)
                 if len(self.pending_chunk) >= self.chunk_size:
                     self.new_chunk_ready.emit(list(self.pending_chunk))
                     self.pending_chunk.clear()
                 self.samples_since_last_analysis += 1
                 if self.samples_since_last_analysis >= self.analysis_trigger:
-                    self.samples_since_last_analysis = 0 
+                    self.samples_since_last_analysis = 0
                     self._analyze_window()
             except ValueError:
                 continue

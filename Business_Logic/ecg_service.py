@@ -1,9 +1,11 @@
 import queue
+from datetime import datetime
 import numpy as np
 from collections import deque
 from PyQt6.QtCore import QObject, pyqtSignal, QThread
 from Data.ecg_serial.ecg_serial_receiver import ECGSerialReader
 from scipy.signal import find_peaks, butter, filtfilt, lfilter, lfilter_zi
+
 
 class ECGPeakDetector(QThread):
     """Thread 2: Peak detection, RR, and HRV extraction"""
@@ -15,8 +17,8 @@ class ECGPeakDetector(QThread):
         self.sample_rate = sample_rate
         self.data_queue = queue.Queue()
         self.is_running = True
-        self.absolute_sample_count = 0 
-        self.last_peak_absolute_time = 0 
+        self.absolute_sample_count = 0
+        self.last_peak_absolute_time = 0
 
     def add_buffer(self, raw_buffer, smoothed_buffer):
         self.data_queue.put((raw_buffer, smoothed_buffer))
@@ -33,7 +35,6 @@ class ECGPeakDetector(QThread):
         raw_data = np.array(raw_buffer)
         smoothed_data = np.array(smoothed_buffer)
 
-        # 1. Filter & Detect Peaks
         filtered_data = self._butter_bandpass_filter(raw_data, 0.5, 40.0, self.sample_rate)
         threshold = np.mean(filtered_data) + 1.2 * np.std(filtered_data)
         min_distance = int(self.sample_rate * 0.4)
@@ -45,8 +46,6 @@ class ECGPeakDetector(QThread):
             self.last_peak_absolute_time = absolute_peaks[-1]
             real_bpm = self._calculate_bpm(rr_intervals_ms)
             x_indices, y_values = self._map_ecg_peaks_to_ui(peaks, smoothed_data, len(raw_data))
-
-            # Emit 4 arguments ONLY (NO EDR)
             self.analysis_results.emit(real_bpm, x_indices, y_values, rr_intervals_ms)
         else:
             self.absolute_sample_count += len(raw_data)
@@ -57,12 +56,14 @@ class ECGPeakDetector(QThread):
         if self.last_peak_absolute_time > 0:
             rr_time_sec = (absolute_peaks[0] - self.last_peak_absolute_time) / self.sample_rate
             rr_ms = rr_time_sec * 1000.0
-            if 300 < rr_ms < 2000: rr_intervals_ms.append(rr_ms)
-        
+            if 300 < rr_ms < 2000:
+                rr_intervals_ms.append(rr_ms)
+
         for i in range(1, len(absolute_peaks)):
-            rr_time_sec = (absolute_peaks[i] - absolute_peaks[i-1]) / self.sample_rate
+            rr_time_sec = (absolute_peaks[i] - absolute_peaks[i - 1]) / self.sample_rate
             rr_ms = rr_time_sec * 1000.0
-            if 300 < rr_ms < 2000: rr_intervals_ms.append(rr_ms)
+            if 300 < rr_ms < 2000:
+                rr_intervals_ms.append(rr_ms)
         return rr_intervals_ms
 
     def _calculate_bpm(self, rr_intervals_ms):
@@ -70,8 +71,8 @@ class ECGPeakDetector(QThread):
         return int(60 / latest_rr_sec) if rr_intervals_ms else 0
 
     def _map_ecg_peaks_to_ui(self, peaks, smoothed_data, buffer_len):
-        ui_window_size = 1000  
-        offset = buffer_len - ui_window_size  
+        ui_window_size = 1000
+        offset = buffer_len - ui_window_size
         x_indices = [int(p - offset) for p in peaks if p >= offset]
         y_values = [int(smoothed_data[p]) for p in peaks if p >= offset]
         return x_indices, y_values
@@ -89,7 +90,15 @@ class ECGPeakDetector(QThread):
 
 
 class ECGService(QObject):
-    """Coordinates threads and calculates Apnea Index"""
+    """
+    Coordinates threads and calculates the Apnea Index.
+
+    NEW: emits `apnea_event_occurred(dict)` whenever the state machine
+    CONFIRMS an event. The dict carries the clinical details; consumers:
+      - SessionRecorder -> builds the session record
+      - VoiceAlerter    -> spoken warning
+    The dashboard keeps using apnea_warning_triggered for its label.
+    """
     live_chunk_ready = pyqtSignal(list)
     bpm_updated = pyqtSignal(int)
     rr_updated = pyqtSignal(list)
@@ -98,6 +107,9 @@ class ECGService(QObject):
     apnea_warning_triggered = pyqtSignal(bool, str)
     apnea_event_count_updated = pyqtSignal(int)
     sensor_status_changed = pyqtSignal(bool, str)
+    # NEW ------------------------------------------------------
+    apnea_event_occurred = pyqtSignal(dict)
+    # ----------------------------------------------------------
 
     def __init__(self, port="COM4", baudrate=115200, sample_rate=250):
         super().__init__()
@@ -109,13 +121,12 @@ class ECGService(QObject):
         self._live_buffer = []
         self._chunk_size = 10
 
-        # Advanced HRV & Apnea State Variables
         self.rr_history = deque(maxlen=150)
         self.baseline_rmssd = deque(maxlen=60)
         self.ai_history = deque(maxlen=60)
         self.consecutive_apnea_windows = 0
         self.apnea_event_count = 0
-        self.apnea_cooldown = 0 
+        self.apnea_cooldown = 0
 
         self.reader = ECGSerialReader(port=port, baudrate=baudrate, sample_rate=self.sample_rate)
         self.peak_detector = ECGPeakDetector(sample_rate=self.sample_rate)
@@ -127,12 +138,18 @@ class ECGService(QObject):
         self.reader.leads_off_detected.connect(self._handle_leads_off)
         self.reader.connection_error.connect(self._handle_connection_error)
 
-    def start_monitoring(self): 
-        self.reader.start()
+    def start_monitoring(self):
+        # Safe to call again after stop_monitoring() (new session)
+        if not self.peak_detector.isRunning():
+            self.peak_detector.start()
+        if not self.reader.isRunning():
+            self.reader.start()
 
     def stop_monitoring(self):
-        self.reader.stop()
-        self.peak_detector.stop()
+        if self.reader.isRunning():
+            self.reader.stop()
+        if self.peak_detector.isRunning():
+            self.peak_detector.stop()
 
     def _process_live_chunk(self, chunk: list):
         if self.is_first_chunk:
@@ -146,7 +163,7 @@ class ECGService(QObject):
         self.bpm_updated.emit(bpm)
         self.rr_updated.emit(rr_intervals_ms)
         self.peaks_detected.emit(x_peaks, y_peaks)
-        
+
         if rr_intervals_ms:
             self._process_rr_for_hrv(rr_intervals_ms)
 
@@ -157,7 +174,7 @@ class ECGService(QObject):
             self._evaluate_apnea_index()
 
     def _clean_rr_series(self, raw_rr_list):
-        if len(raw_rr_list) < 5: 
+        if len(raw_rr_list) < 5:
             return raw_rr_list
         med_rr = np.median(raw_rr_list)
         clean_rr = []
@@ -179,10 +196,9 @@ class ECGService(QObject):
         rmssd_t, sdrr_t = self._calculate_hrv_features(current_rr)
         self.hrv_updated.emit(round(rmssd_t, 1))
 
-        if rmssd_t == 0 or sdrr_t == 0: 
+        if rmssd_t == 0 or sdrr_t == 0:
             return
 
-        # Simple baseline calculation
         if len(self.baseline_rmssd) < 10:
             self.baseline_rmssd.append(rmssd_t)
             return
@@ -196,7 +212,7 @@ class ECGService(QObject):
         self._run_simplified_state_machine(drop_ratio, rmssd_t, normal_rmssd)
 
     def _run_simplified_state_machine(self, drop_ratio, current_rmssd, normal_rmssd):
-        is_apnea_suspected = drop_ratio < 0.55 
+        is_apnea_suspected = drop_ratio < 0.55
 
         if self.apnea_cooldown > 0:
             self.apnea_cooldown -= 1
@@ -214,19 +230,28 @@ class ECGService(QObject):
             msg = f"⚠️ Apnea Event! (HRV dropped from {int(normal_rmssd)} to {int(current_rmssd)})"
             self.apnea_warning_triggered.emit(True, msg)
             self.apnea_event_count_updated.emit(self.apnea_event_count)
+            # NEW: notify the session recorder + voice alerter -------------
+            self.apnea_event_occurred.emit({
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "rmssd_at_event": round(float(current_rmssd), 1),
+                "baseline_rmssd": round(float(normal_rmssd), 1),
+                "drop_ratio": round(float(drop_ratio), 3),
+                "event_count": self.apnea_event_count,
+            })
+            # ---------------------------------------------------------------
             self.consecutive_apnea_windows = 0
             self.apnea_cooldown = 15
         else:
             self.apnea_warning_triggered.emit(False, f"Normal HRV: {int(current_rmssd)} ms")
 
     def _calculate_rmssd(self, rr_list):
-        if len(rr_list) < 2: 
+        if len(rr_list) < 2:
             return 0.0
         diff_rr = np.diff(rr_list)
-        return float(np.sqrt(np.mean(diff_rr**2)))
+        return float(np.sqrt(np.mean(diff_rr ** 2)))
 
     def _calculate_sdrr(self, rr_list):
-        if len(rr_list) < 2: 
+        if len(rr_list) < 2:
             return 0.0
         return float(np.std(rr_list))
 

@@ -1,1 +1,0 @@
-from .real_time_ecg_viewer import RealTimeECGViewer
