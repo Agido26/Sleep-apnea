@@ -143,7 +143,26 @@ class ECGService(QObject):
         self.reader.connection_error.connect(self._handle_connection_error)
 
     def start_monitoring(self):
-        # Safe to call again after stop_monitoring() (new session)
+        """Starts monitoring and resets all state for a new session."""
+        # 1. Reset Filter State
+        self.is_first_chunk = True
+        self._live_buffer = []
+        
+        # 2. Reset HRV & Apnea State
+        self.rr_history.clear()
+        self.baseline_rmssd.clear()
+        self.ai_history.clear()
+        self.consecutive_apnea_windows = 0
+        self.apnea_cooldown = 0
+        self.apnea_event_count = 0
+        
+        # 3. Reset Peak Detector State (Crucial for new session)
+        self.peak_detector.absolute_sample_count = 0
+        self.peak_detector.last_peak_absolute_time = 0
+        self.peak_detector.edr_times = []
+        self.peak_detector.edr_amps = []
+        
+        # 4. Restart threads if they are not running
         if not self.peak_detector.isRunning():
             self.peak_detector.start()
         if not self.reader.isRunning():
